@@ -9,11 +9,14 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import fitz  # PyMuPDF
 import threading
 import time
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import urllib.parse
 
 # ======================
 # CONFIGURAÇÃO FLASK
 # ======================
-app = Flask(__name__, static_folder="static", static_url_path="")
+app = Flask(__name__, static_folder='main', static_url_path='')
 
 # Configurações para Render
 API_KEY = os.getenv("API_KEY", "fmFeKYVdcU06C3S57mmVZ4BhsEwdVIww")
@@ -23,13 +26,37 @@ EVOLUTION_URL = os.getenv("EVOLUTION_URL", f"http://localhost:8081/message/sendM
 CORS(app)
 
 # ======================
+# CONFIGURAÇÕES DE BANCO DE DADOS
+# ======================
+def get_database_config():
+    database_url = os.getenv('DATABASE_URL')
+    
+    if database_url and database_url.startswith('postgres://'):
+        database_url = database_url.replace('postgres://', 'postgresql://', 1)
+    
+    if database_url and database_url.startswith('postgresql://'):
+        # Usar PostgreSQL (Render)
+        return {
+            'type': 'postgresql',
+            'url': database_url
+        }
+    else:
+        # Usar SQLite (local)
+        return {
+            'type': 'sqlite',
+            'url': os.path.join(os.path.dirname(os.path.abspath(__file__)), 'whatsapp_scheduler.db')
+        }
+
+DB_CONFIG = get_database_config()
+
+# ======================
 # CONFIGURAÇÕES DE ARQUIVOS
 # ======================
-UPLOAD_FOLDER = os.path.join(os.getcwd(), 'uploads')
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
 THUMB_FOLDER = os.path.join(UPLOAD_FOLDER, 'thumbs')
 THUMBNAIL_SIZE = (100, 100)
-DEFAULT_DOC_ICON = "/static/default_doc.png"
-DATABASE = os.path.join(os.getcwd(), 'whatsapp_scheduler.db')
+DEFAULT_DOC_ICON = "/default_doc.png"
 
 # Criar diretórios
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -38,39 +65,88 @@ os.makedirs(THUMB_FOLDER, exist_ok=True)
 # ======================
 # BANCO DE DADOS
 # ======================
+def get_db_connection():
+    if DB_CONFIG['type'] == 'postgresql':
+        # PostgreSQL
+        conn = psycopg2.connect(DB_CONFIG['url'], sslmode='require')
+        conn.cursor_factory = RealDictCursor
+        return conn
+    else:
+        # SQLite
+        conn = sqlite3.connect(DB_CONFIG['url'])
+        conn.row_factory = sqlite3.Row
+        return conn
+
 def init_db():
-    with closing(sqlite3.connect(DATABASE)) as conn:
+    with closing(get_db_connection()) as conn:
         with conn:
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS scheduled_messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    job_id TEXT NOT NULL UNIQUE,
-                    number TEXT NOT NULL,
-                    media_path TEXT NOT NULL,
-                    thumbnail_path TEXT,
-                    mediatype TEXT NOT NULL,
-                    caption TEXT,
-                    scheduled_at TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    last_attempt TEXT,
-                    error TEXT
-                )
-            ''')
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    job_id TEXT,
-                    scheduled_at TEXT,
-                    sent_at TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    caption TEXT,
-                    destination TEXT NOT NULL,
-                    mediatype TEXT,
-                    thumbnail_path TEXT,
-                    response TEXT NOT NULL,
-                    error TEXT
-                )
-            ''')
+            cursor = conn.cursor()
+            
+            if DB_CONFIG['type'] == 'postgresql':
+                # PostgreSQL
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS scheduled_messages (
+                        id SERIAL PRIMARY KEY,
+                        job_id TEXT NOT NULL UNIQUE,
+                        number TEXT NOT NULL,
+                        media_path TEXT NOT NULL,
+                        thumbnail_path TEXT,
+                        mediatype TEXT NOT NULL,
+                        caption TEXT,
+                        scheduled_at TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        last_attempt TEXT,
+                        error TEXT
+                    )
+                ''')
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS logs (
+                        id SERIAL PRIMARY KEY,
+                        job_id TEXT,
+                        scheduled_at TEXT,
+                        sent_at TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        caption TEXT,
+                        destination TEXT NOT NULL,
+                        mediatype TEXT,
+                        thumbnail_path TEXT,
+                        response TEXT NOT NULL,
+                        error TEXT
+                    )
+                ''')
+            else:
+                # SQLite
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS scheduled_messages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        job_id TEXT NOT NULL UNIQUE,
+                        number TEXT NOT NULL,
+                        media_path TEXT NOT NULL,
+                        thumbnail_path TEXT,
+                        mediatype TEXT NOT NULL,
+                        caption TEXT,
+                        scheduled_at TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        last_attempt TEXT,
+                        error TEXT
+                    )
+                ''')
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        job_id TEXT,
+                        scheduled_at TEXT,
+                        sent_at TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        caption TEXT,
+                        destination TEXT NOT NULL,
+                        mediatype TEXT,
+                        thumbnail_path TEXT,
+                        response TEXT NOT NULL,
+                        error TEXT
+                    )
+                ''')
+            conn.commit()
 
 init_db()
 scheduler = BackgroundScheduler()
@@ -80,9 +156,7 @@ scheduler.start()
 # FUNÇÕES AUXILIARES
 # ======================
 def get_db():
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return get_db_connection()
 
 def is_base64(sb):
     try:
@@ -133,7 +207,10 @@ def create_thumbnail(filepath, mediatype='image'):
 def send_message_to_evolution(job_id):
     try:
         with get_db() as conn:
-            row = conn.execute("SELECT * FROM scheduled_messages WHERE job_id=?", (job_id,)).fetchone()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM scheduled_messages WHERE job_id=%s", (job_id,))
+            row = cursor.fetchone()
+            
             if not row:
                 print(f"Job {job_id} não encontrado")
                 return
@@ -150,27 +227,31 @@ def send_message_to_evolution(job_id):
                     payload['media'] = base64.b64encode(f.read()).decode()
             except Exception as e:
                 error_msg = f"Erro ao ler arquivo: {str(e)}"
-                conn.execute("UPDATE scheduled_messages SET status=?, last_attempt=?, error=? WHERE job_id=?",
+                cursor.execute("UPDATE scheduled_messages SET status=%s, last_attempt=%s, error=%s WHERE job_id=%s",
                            ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
+                conn.commit()
                 return
 
             try:
                 response = requests.post(EVOLUTION_URL, json=payload, headers={"apikey": API_KEY}, timeout=30)
                 
                 if response.status_code == 200:
-                    conn.execute("UPDATE scheduled_messages SET status=?, last_attempt=?, error=NULL WHERE job_id=?",
+                    cursor.execute("UPDATE scheduled_messages SET status=%s, last_attempt=%s, error=NULL WHERE job_id=%s",
                                ("enviado", datetime.now(timezone.utc).isoformat(), job_id))
+                    conn.commit()
                     print(f"Mensagem {job_id} enviada com sucesso")
                 else:
                     error_msg = f"Erro HTTP {response.status_code}: {response.text}"
-                    conn.execute("UPDATE scheduled_messages SET status=?, last_attempt=?, error=? WHERE job_id=?",
+                    cursor.execute("UPDATE scheduled_messages SET status=%s, last_attempt=%s, error=%s WHERE job_id=%s",
                                ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
+                    conn.commit()
                     print(f"Erro ao enviar mensagem {job_id}: {error_msg}")
 
             except Exception as e:
                 error_msg = f"Erro de conexão: {str(e)}"
-                conn.execute("UPDATE scheduled_messages SET status=?, last_attempt=?, error=? WHERE job_id=?",
+                cursor.execute("UPDATE scheduled_messages SET status=%s, last_attempt=%s, error=%s WHERE job_id=%s",
                            ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
+                conn.commit()
                 print(f"Erro de conexão para mensagem {job_id}: {error_msg}")
 
     except Exception as e:
@@ -181,7 +262,10 @@ def send_message_to_evolution(job_id):
 # ======================
 def reload_pending_schedules():
     with get_db() as conn:
-        rows = conn.execute("SELECT * FROM scheduled_messages WHERE status='agendado'").fetchall()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM scheduled_messages WHERE status='agendado'")
+        rows = cursor.fetchall()
+        
         for row in rows:
             job_id = row['job_id']
             scheduled_at = datetime.fromisoformat(row['scheduled_at'])
@@ -195,11 +279,25 @@ def reload_pending_schedules():
 # ======================
 @app.route('/')
 def index():
-    return send_from_directory(app.static_folder, "index.html")
+    try:
+        return send_from_directory(app.static_folder, 'index.html')
+    except Exception as e:
+        return f"""
+        <html>
+            <head><title>ICPA WhatsApp Scheduler</title></head>
+            <body>
+                <h1>ICPA WhatsApp Scheduler</h1>
+                <p>API está funcionando!</p>
+                <p>Database: {DB_CONFIG['type']}</p>
+                <p><a href="/api/health">Health Check</a></p>
+                <p><a href="/api/scheduled">Scheduled Messages</a></p>
+            </body>
+        </html>
+        """
 
-@app.route('/<path:path>')
-def serve_static(path):
-    return send_from_directory(app.static_folder, path)
+@app.route('/<path:filename>')
+def serve_static(filename):
+    return send_from_directory(app.static_folder, filename)
 
 @app.route('/uploads/<path:filename>')
 def uploaded_file(filename):
@@ -209,6 +307,9 @@ def uploaded_file(filename):
 def uploaded_thumb(filename):
     return send_from_directory(THUMB_FOLDER, filename)
 
+# ======================
+# API ROUTES
+# ======================
 @app.route('/api/send-media', methods=['POST'])
 def handle_send_media():
     client_key = request.headers.get('apikey')
@@ -230,13 +331,24 @@ def handle_send_media():
         job_id = str(uuid.uuid4())
 
         with get_db() as conn:
-            conn.execute('''
-                INSERT INTO scheduled_messages (
-                    job_id, number, media_path, thumbnail_path, mediatype, caption,
-                    scheduled_at, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (job_id, number, media_path, thumbnail_path, mediatype, data.get('caption',''),
-                  datetime.now(timezone.utc).isoformat(), 'processando'))
+            cursor = conn.cursor()
+            if DB_CONFIG['type'] == 'postgresql':
+                cursor.execute('''
+                    INSERT INTO scheduled_messages (
+                        job_id, number, media_path, thumbnail_path, mediatype, caption,
+                        scheduled_at, status
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ''', (job_id, number, media_path, thumbnail_path, mediatype, data.get('caption',''),
+                      datetime.now(timezone.utc).isoformat(), 'processando'))
+            else:
+                cursor.execute('''
+                    INSERT INTO scheduled_messages (
+                        job_id, number, media_path, thumbnail_path, mediatype, caption,
+                        scheduled_at, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (job_id, number, media_path, thumbnail_path, mediatype, data.get('caption',''),
+                      datetime.now(timezone.utc).isoformat(), 'processando'))
+            conn.commit()
 
         def background_send():
             time.sleep(1)
@@ -278,13 +390,24 @@ def schedule_media():
         job_id = str(uuid.uuid4())
 
         with get_db() as conn:
-            conn.execute('''
-                INSERT INTO scheduled_messages (
-                    job_id, number, media_path, thumbnail_path, mediatype, caption,
-                    scheduled_at, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (job_id, number, media_path, thumbnail_path, mediatype, data.get('caption',''),
-                  schedule_time.isoformat(), 'agendado'))
+            cursor = conn.cursor()
+            if DB_CONFIG['type'] == 'postgresql':
+                cursor.execute('''
+                    INSERT INTO scheduled_messages (
+                        job_id, number, media_path, thumbnail_path, mediatype, caption,
+                        scheduled_at, status
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ''', (job_id, number, media_path, thumbnail_path, mediatype, data.get('caption',''),
+                      schedule_time.isoformat(), 'agendado'))
+            else:
+                cursor.execute('''
+                    INSERT INTO scheduled_messages (
+                        job_id, number, media_path, thumbnail_path, mediatype, caption,
+                        scheduled_at, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (job_id, number, media_path, thumbnail_path, mediatype, data.get('caption',''),
+                      schedule_time.isoformat(), 'agendado'))
+            conn.commit()
 
         scheduler.add_job(send_message_to_evolution, 'date', run_date=schedule_time, args=[job_id], id=job_id)
 
@@ -306,9 +429,16 @@ def get_scheduled_messages():
     
     try:
         with get_db() as conn:
-            cursor = conn.execute("SELECT * FROM scheduled_messages ORDER BY scheduled_at DESC")
+            cursor = conn.cursor()
+            if DB_CONFIG['type'] == 'postgresql':
+                cursor.execute("SELECT * FROM scheduled_messages ORDER BY scheduled_at DESC")
+            else:
+                cursor.execute("SELECT * FROM scheduled_messages ORDER BY scheduled_at DESC")
+            
+            rows = cursor.fetchall()
             messages = []
-            for row in cursor.fetchall():
+            
+            for row in rows:
                 thumb_url = DEFAULT_DOC_ICON
                 if row['thumbnail_path']:
                     thumb_filename = os.path.basename(row['thumbnail_path'])
@@ -340,7 +470,13 @@ def get_message_status(job_id):
     
     try:
         with get_db() as conn:
-            row = conn.execute("SELECT * FROM scheduled_messages WHERE job_id=?", (job_id,)).fetchone()
+            cursor = conn.cursor()
+            if DB_CONFIG['type'] == 'postgresql':
+                cursor.execute("SELECT * FROM scheduled_messages WHERE job_id=%s", (job_id,))
+            else:
+                cursor.execute("SELECT * FROM scheduled_messages WHERE job_id=?", (job_id,))
+            
+            row = cursor.fetchone()
             
             if row:
                 return jsonify({
@@ -363,17 +499,26 @@ def get_message_status(job_id):
 def health_check():
     try:
         with get_db() as conn:
-            conn.execute("SELECT 1")
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            
+        # Verifica se a pasta main existe
+        main_exists = os.path.exists(app.static_folder)
+        index_exists = os.path.exists(os.path.join(app.static_folder, 'index.html')) if main_exists else False
+        
         return jsonify({
             "status": "healthy", 
-            "database": "connected",
+            "database": DB_CONFIG['type'],
+            "main_folder_exists": main_exists,
+            "index_html_exists": index_exists,
+            "main_folder_path": app.static_folder,
             "environment": "production",
             "timestamp": datetime.now(timezone.utc).isoformat()
         }), 200
     except Exception as e:
         return jsonify({
             "status": "unhealthy", 
-            "database": "disconnected",
+            "database": DB_CONFIG['type'],
             "error": str(e)
         }), 500
 
@@ -382,9 +527,29 @@ def health_check():
 # ======================
 def initialize_app():
     print("Iniciando servidor Flask...")
+    print(f"Diretório atual: {os.getcwd()}")
+    print(f"Main folder: {app.static_folder}")
+    print(f"Database type: {DB_CONFIG['type']}")
+    
+    # Listar arquivos no diretório atual
+    print("Arquivos no diretório raiz:")
+    for file in os.listdir('.'):
+        print(f"  - {file}")
+    
+    # Listar arquivos na pasta main se existir
+    if os.path.exists(app.static_folder):
+        print("Arquivos na pasta main:")
+        for file in os.listdir(app.static_folder):
+            print(f"  - {file}")
+    else:
+        print("Pasta main não encontrada!")
+    
     try:
         with get_db() as conn:
-            count = conn.execute("SELECT COUNT(*) FROM scheduled_messages").fetchone()[0]
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) as count FROM scheduled_messages")
+            result = cursor.fetchone()
+            count = result['count'] if DB_CONFIG['type'] == 'postgresql' else result[0]
             print(f"Banco de dados OK. {count} mensagens agendadas.")
     except Exception as e:
         print(f"Erro no banco de dados: {e}")
@@ -396,4 +561,6 @@ initialize_app()
 
 if __name__ == '__main__':
     port = int(os.getenv("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    debug = os.getenv("DEBUG", "false").lower() == "true"
+    print(f"Iniciando servidor na porta {port}...")
+    app.run(host='0.0.0.0', port=port, debug=debug)
