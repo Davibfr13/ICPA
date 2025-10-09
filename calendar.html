@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Calendário de Envios - WhatsApp</title>
+    <link href="https://cdn.jsdelivr.net/npm/fullcalendar@5.11.3/main.min.css" rel="stylesheet">
+    <style>
+        /* Estilos gerais */
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f8f9fa;
+        }
+        
+        /* Espaço para o logo */
+        .logo-container {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .logo-container img {
+            max-width: 150px;
+            height: auto;
+        }
+        
+        /* Menu de navegação */
+        .nav-menu {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 20px;
+            background-color: white;
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .nav-link {
+            margin: 0 15px;
+            text-decoration: none;
+            color: #333;
+            font-weight: bold;
+            padding: 8px 15px;
+            border-radius: 4px;
+            transition: all 0.3s;
+        }
+        .nav-link:hover {
+            background-color: #e9ecef;
+        }
+        .nav-link.active {
+            background-color: #00ffb9;
+            color: black;
+        }
+        
+        /* Título */
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 20px;
+        }
+        
+        /* Container do calendário */
+        #calendar {
+            margin-top: 20px;
+            background-color: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        /* Estilos para os eventos no calendário */
+        .event-scheduled { 
+            background-color: #00ffb9; 
+            border-color: #00ffb9;
+            color: black;
+        }
+        .event-success { 
+            background-color: #28a745; 
+            border-color: #28a745;
+            color: white;
+        }
+        .event-failed { 
+            background-color: #dc3545; 
+            border-color: #dc3545;
+            color: white;
+        }
+        
+        /* Miniaturas nos eventos */
+        .event-thumbnail {
+            width: 50px;
+            height: 50px;
+            object-fit: cover;
+            border-radius: 4px;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+        
+        /* Modal de detalhes */
+        #eventModal {
+            display: none;
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: white;
+            padding: 25px;
+            border-radius: 8px;
+            box-shadow: 0 0 15px rgba(0,0,0,0.2);
+            z-index: 1000;
+            max-width: 80%;
+            max-height: 80vh;
+            overflow-y: auto;
+            border: 2px solid #00ffb9;
+        }
+        
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 999;
+        }
+        
+        #modalClose {
+            margin-top: 15px;
+            padding: 10px 20px;
+            background: #333;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background 0.3s;
+        }
+        #modalClose:hover {
+            background: #555;
+        }
+        
+        /* Estilos para o conteúdo do modal */
+        .event-popup {
+            max-width: 300px;
+        }
+        .popup-thumbnail {
+            max-width: 100%;
+            max-height: 200px;
+            display: block;
+            margin: 10px auto;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+        }
+        .modal-content-section {
+            margin-bottom: 15px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #eee;
+        }
+        .modal-content-section:last-child {
+            border-bottom: none;
+            margin-bottom: 0;
+            padding-bottom: 0;
+        }
+        
+        /* Resposta formatada */
+        .response-container {
+            background-color: #f8f9fa;
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+            max-height: 150px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            border: 1px solid #ddd;
+        }
+        
+        /* Ajustes no FullCalendar */
+        .fc-header-toolbar {
+            margin-bottom: 1em;
+        }
+        .fc-button {
+            background-color: #00ffb9 !important;
+            color: black !important;
+            border: none !important;
+            font-weight: bold;
+        }
+        .fc-button:hover {
+            background-color: #00e6a8 !important;
+        }
+        .fc-button-active {
+            background-color: #00cc97 !important;
+        }
+        .fc-today-button {
+            background-color: #333 !important;
+            color: white !important;
+        }
+        .fc-today-button:hover {
+            background-color: #555 !important;
+        }
+    </style>
+</head>
+<body>
+    <!-- Espaço para o logo do ICPA -->
+    <div class="logo-container">
+        <img src="icpa-logo.png" alt="Logo ICPA" id="icpaLogo">
+    </div>
+    
+    <!-- Menu de navegação -->
+    <div class="nav-menu">
+        <a href="index.html" class="nav-link">Envio de Mídia</a>
+        <a href="calendar.html" class="nav-link active">Calendário de Envios</a>
+    </div>
+    
+    <h1>Calendário de Envios</h1>
+    <div id="calendar"></div>
+    
+    <!-- Modal para detalhes do evento -->
+    <div class="modal-overlay" id="modalOverlay"></div>
+    <div id="eventModal">
+        <div id="modalContent"></div>
+        <button id="modalClose">Fechar</button>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/fullcalendar@5.11.3/main.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Destacar link ativo
+            const currentPage = window.location.pathname.split('/').pop() || 'index.html';
+            document.querySelectorAll('.nav-link').forEach(link => {
+                if (link.getAttribute('href') === currentPage) {
+                    link.classList.add('active');
+                }
+            });
+
+            // Elementos do modal
+            const modal = document.getElementById('eventModal');
+            const modalOverlay = document.getElementById('modalOverlay');
+            const modalClose = document.getElementById('modalClose');
+            
+            // Funções para controlar o modal
+            function openModal() {
+                modal.style.display = 'block';
+                modalOverlay.style.display = 'block';
+            }
+            
+            function closeModal() {
+                modal.style.display = 'none';
+                modalOverlay.style.display = 'none';
+            }
+            
+            modalClose.addEventListener('click', closeModal);
+            modalOverlay.addEventListener('click', closeModal);
+
+            // Inicializar calendário
+            const calendarEl = document.getElementById('calendar');
+            const calendar = new FullCalendar.Calendar(calendarEl, {
+                initialView: 'dayGridMonth',
+                headerToolbar: {
+                    left: 'prev,next today',
+                    center: 'title',
+                    right: 'dayGridMonth,timeGridWeek,timeGridDay'
+                },
+                events: async function(fetchInfo, successCallback, failureCallback) {
+                    try {
+                        // Busca agendamentos
+                        const scheduledResponse = await axios.get('http://localhost:5000/api/scheduled', {
+                            headers: {
+                                'apikey': 'fmFeKYVdcU06C3S57mmVZ4BhsEwdVIww'
+                            }
+                        });
+                        
+                        const scheduledEvents = scheduledResponse.data.map(event => {
+                            // Lógica simplificada de status
+                            const hasError = event.error && event.error.trim() !== '';
+                            const isPastEvent = new Date(event.scheduled_at) < new Date();
+                            
+                            let status;
+                            if (hasError) {
+                                status = 'failed';
+                            } else if (event.status === 'success') {
+                                status = 'success';
+                            } else if (isPastEvent) {
+                                status = 'failed';
+                            } else {
+                                status = 'scheduled';
+                            }
+                            
+                            return {
+                                title: getEventTitle(event.number, status),
+                                start: event.scheduled_at,
+                                classNames: [`event-${status}`],
+                                extendedProps: {
+                                    type: 'scheduled',
+                                    data: event,
+                                    status: status,
+                                    error: event.error || null,
+                                    hasThumbnail: event.thumbnail ? true : false,
+                                    thumbnailUrl: event.thumbnail || null
+                                }
+                            };
+                        });
+
+                        // Busca logs
+                        const logsResponse = await axios.get('http://localhost:5000/api/logs', {
+                            headers: {
+                                'apikey': 'fmFeKYVdcU06C3S57mmVZ4BhsEwdVIww'
+                            }
+                        });
+                        
+                        const logEvents = logsResponse.data.map(log => {
+                            // Determina o status baseado na presença de erros
+                            const hasError = log.error && log.error.trim() !== '';
+                            const status = hasError ? 'failed' : 'success';
+                            
+                            return {
+                                title: getEventTitle(log.destination, status),
+                                start: log.sent_at,
+                                classNames: [`event-${status}`],
+                                extendedProps: {
+                                    type: 'log',
+                                    data: log,
+                                    status: status,
+                                    error: log.error || null,
+                                    hasThumbnail: log.thumbnail ? true : false,
+                                    thumbnailUrl: log.thumbnail || null
+                                }
+                            };
+                        });
+
+                        successCallback([...scheduledEvents, ...logEvents]);
+                    } catch (error) {
+                        console.error('Erro ao buscar eventos:', error);
+                        failureCallback(error);
+                    }
+                },
+                eventContent: function(arg) {
+                    const eventElement = document.createElement('div');
+                    eventElement.style.display = 'flex';
+                    eventElement.style.alignItems = 'center';
+                    
+                    // Adiciona miniatura se existir
+                    if (arg.event.extendedProps.hasThumbnail) {
+                        const imageElement = document.createElement('img');
+                        imageElement.src = arg.event.extendedProps.thumbnailUrl;
+                        imageElement.className = 'event-thumbnail';
+                        imageElement.alt = 'Miniatura';
+                        eventElement.appendChild(imageElement);
+                    }
+                    
+                    // Adiciona título
+                    const titleElement = document.createElement('div');
+                    titleElement.innerHTML = arg.event.title;
+                    eventElement.appendChild(titleElement);
+                    
+                    return { domNodes: [eventElement] };
+                },
+                eventClick: async function(info) {
+                    const event = info.event.extendedProps.data;
+                    const status = info.event.extendedProps.status;
+                    const error = info.event.extendedProps.error;
+                    
+                    let details = '';
+                    let thumbnailUrl = info.event.extendedProps.thumbnailUrl;
+                    
+                    // Se não tiver thumbnail mas tiver job_id, tenta buscar
+                    if (!thumbnailUrl && event.job_id) {
+                        try {
+                            const response = await axios.get(`http://localhost:5000/api/thumbnail/${event.job_id}`, {
+                                headers: {
+                                    'apikey': 'fmFeKYVdcU06C3S57mmVZ4BhsEwdVIww'
+                                }
+                            });
+                            if (response.data.thumbnail) {
+                                thumbnailUrl = response.data.thumbnail;
+                            }
+                        } catch (e) {
+                            console.log('Não foi possível buscar miniatura:', e);
+                        }
+                    }
+                    
+                    if (info.event.extendedProps.type === 'scheduled') {
+                        details = `
+                            <div class="event-popup">
+                                <h3>Agendamento</h3>
+                                ${thumbnailUrl ? `
+                                    <div class="modal-content-section">
+                                        <img src="${thumbnailUrl}" class="popup-thumbnail" alt="Imagem agendada">
+                                    </div>
+                                ` : ''}
+                                <div class="modal-content-section">
+                                    <p><strong>Número:</strong> ${event.number}</p>
+                                    <p><strong>Data:</strong> ${formatDateTime(event.scheduled_at)}</p>
+                                    <p><strong>Status:</strong> ${getStatusText(status)}</p>
+                                    ${error ? `<p><strong>Erro:</strong> ${error}</p>` : ''}
+                                </div>
+                                <div class="modal-content-section">
+                                    <p><strong>Tipo de Mídia:</strong> ${event.mediatype || 'Não especificado'}</p>
+                                    <p><strong>Legenda:</strong> ${event.caption || 'Nenhuma'}</p>
+                                </div>
+                            </div>
+                        `;
+                    } else {
+                        // Formata a resposta para exibição
+                        let formattedResponse = '';
+                        try {
+                            if (typeof event.response === 'string') {
+                                // Tenta converter string JSON para objeto
+                                formattedResponse = JSON.stringify(JSON.parse(event.response), null, 2);
+                            } else {
+                                formattedResponse = JSON.stringify(event.response, null, 2);
+                            }
+                        } catch (e) {
+                            formattedResponse = event.response;
+                        }
+                        
+                        details = `
+                            <div class="event-popup">
+                                <h3>Log de Envio</h3>
+                                ${thumbnailUrl ? `
+                                    <div class="modal-content-section">
+                                        <img src="${thumbnailUrl}" class="popup-thumbnail" alt="Imagem enviada">
+                                    </div>
+                                ` : ''}
+                                <div class="modal-content-section">
+                                    <p><strong>Número:</strong> ${event.destination}</p>
+                                    <p><strong>Enviado em:</strong> ${formatDateTime(event.sent_at)}</p>
+                                    <p><strong>Status:</strong> ${getStatusText(status)}</p>
+                                    ${error ? `<p><strong>Erro:</strong> ${error}</p>` : ''}
+                                </div>
+                                <div class="modal-content-section">
+                                    <p><strong>Tipo de Mídia:</strong> ${event.mediatype || 'Não especificado'}</p>
+                                </div>
+                                ${event.response ? `
+                                    <div class="modal-content-section">
+                                        <p><strong>Resposta:</strong></p>
+                                        <div class="response-container">${formattedResponse}</div>
+                                    </div>
+                                ` : ''}
+                            </div>
+                        `;
+                    }
+                    
+                    document.getElementById('modalContent').innerHTML = details;
+                    openModal();
+                }
+            });
+            
+            calendar.render();
+            
+            // Atualizar calendário a cada minuto
+            setInterval(() => {
+                calendar.refetchEvents();
+            }, 60000);
+
+            // Funções auxiliares
+            function getEventTitle(number, status) {
+                const icons = {
+                    'scheduled': '⏱',
+                    'success': '✅',
+                    'failed': '❌'
+                };
+                return `${icons[status] || ''} ${number}`;
+            }
+            
+            function getStatusText(status) {
+                const statusMap = {
+                    'scheduled': 'Agendado',
+                    'success': 'Enviado com sucesso',
+                    'failed': 'Falha no envio'
+                };
+                return statusMap[status] || status;
+            }
+            
+            function formatDateTime(dateString) {
+                if (!dateString) return 'Não informado';
+                const date = new Date(dateString);
+                return date.toLocaleDateString('pt-BR') + ' ' + date.toLocaleTimeString('pt-BR');
+            }
+        });
+    </script>
+</body>
+</html>
