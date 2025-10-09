@@ -2,12 +2,11 @@ import os
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from datetime import datetime, timezone
-import base64, requests, sqlite3, io, os, uuid
+import base64, requests, sqlite3, os, uuid
 from contextlib import closing
 from PIL import Image
 from apscheduler.schedulers.background import BackgroundScheduler
 import fitz  # PyMuPDF
-import cv2
 import threading
 import time
 
@@ -16,37 +15,29 @@ import time
 # ======================
 app = Flask(__name__, static_folder="static", static_url_path="")
 
-# --- Configurações para Render ---
-app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL", "sqlite:///local.db")
-app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "http://localhost:8080")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-# ----------------------------------------------------------
-
-CORS(app, resources={r"/api/*": {"origins": "*"}})
-
-# ======================
-# CONFIGURAÇÕES
-# ======================
+# Configurações para Render
 API_KEY = os.getenv("API_KEY", "fmFeKYVdcU06C3S57mmVZ4BhsEwdVIww")
 INSTANCE_NAME = os.getenv("INSTANCE_NAME", "ICPA")
 EVOLUTION_URL = os.getenv("EVOLUTION_URL", f"http://localhost:8081/message/sendMedia/{INSTANCE_NAME}")
 
-# Usar /tmp para arquivos temporários no Render
+CORS(app)
+
+# ======================
+# CONFIGURAÇÕES DE ARQUIVOS
+# ======================
 UPLOAD_FOLDER = os.path.join(os.getcwd(), 'uploads')
 THUMB_FOLDER = os.path.join(UPLOAD_FOLDER, 'thumbs')
 THUMBNAIL_SIZE = (100, 100)
-DEFAULT_DOC_ICON = "/static/default_doc.png"  # Mover para pasta static
+DEFAULT_DOC_ICON = "/static/default_doc.png"
+DATABASE = os.path.join(os.getcwd(), 'whatsapp_scheduler.db')
 
 # Criar diretórios
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(THUMB_FOLDER, exist_ok=True)
 
 # ======================
-# BANCO DE DADOS (SQLite persistente)
+# BANCO DE DADOS
 # ======================
-DATABASE = os.path.join(os.getcwd(), 'whatsapp_scheduler.db')
-
 def init_db():
     with closing(sqlite3.connect(DATABASE)) as conn:
         with conn:
@@ -113,19 +104,12 @@ def save_file(file_data, ext):
 def create_thumbnail(filepath, mediatype='image'):
     try:
         thumb_path = os.path.join(THUMB_FOLDER, os.path.basename(filepath) + ".png")
+        
         if mediatype == 'image':
             img = Image.open(filepath)
             img.thumbnail(THUMBNAIL_SIZE)
             img.save(thumb_path)
-        elif mediatype == 'video':
-            cap = cv2.VideoCapture(filepath)
-            ret, frame = cap.read()
-            cap.release()
-            if ret:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                img = Image.fromarray(frame)
-                img.thumbnail(THUMBNAIL_SIZE)
-                img.save(thumb_path)
+            
         elif mediatype == 'document' and filepath.endswith('.pdf'):
             doc = fitz.open(filepath)
             page = doc[0]
@@ -133,27 +117,27 @@ def create_thumbnail(filepath, mediatype='image'):
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             img.thumbnail(THUMBNAIL_SIZE)
             img.save(thumb_path)
+            
         else:
+            # Para vídeo e outros tipos, usa ícone padrão
             return DEFAULT_DOC_ICON
+            
         return thumb_path
     except Exception as e:
         print(f"Erro ao criar thumbnail: {e}")
         return DEFAULT_DOC_ICON
 
 # ======================
-# FUNÇÃO SIMPLES PARA ENVIO
+# FUNÇÃO DE ENVIO
 # ======================
 def send_message_to_evolution(job_id):
-    """Função simples que apenas tenta enviar e atualiza o status no banco"""
     try:
         with get_db() as conn:
-            # Busca os dados da mensagem
             row = conn.execute("SELECT * FROM scheduled_messages WHERE job_id=?", (job_id,)).fetchone()
             if not row:
                 print(f"Job {job_id} não encontrado")
                 return
 
-            # Prepara o payload
             payload = {
                 "number": row['number'],
                 "mediatype": row['mediatype'],
@@ -161,7 +145,6 @@ def send_message_to_evolution(job_id):
                 "caption": row['caption'] or ''
             }
 
-            # Lê o arquivo
             try:
                 with open(row['media_path'], 'rb') as f:
                     payload['media'] = base64.b64encode(f.read()).decode()
@@ -171,24 +154,20 @@ def send_message_to_evolution(job_id):
                            ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
                 return
 
-            # Tenta enviar para a API
             try:
                 response = requests.post(EVOLUTION_URL, json=payload, headers={"apikey": API_KEY}, timeout=30)
                 
                 if response.status_code == 200:
-                    # Sucesso
                     conn.execute("UPDATE scheduled_messages SET status=?, last_attempt=?, error=NULL WHERE job_id=?",
                                ("enviado", datetime.now(timezone.utc).isoformat(), job_id))
                     print(f"Mensagem {job_id} enviada com sucesso")
                 else:
-                    # Erro HTTP
                     error_msg = f"Erro HTTP {response.status_code}: {response.text}"
                     conn.execute("UPDATE scheduled_messages SET status=?, last_attempt=?, error=? WHERE job_id=?",
                                ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
                     print(f"Erro ao enviar mensagem {job_id}: {error_msg}")
 
             except Exception as e:
-                # Erro de conexão
                 error_msg = f"Erro de conexão: {str(e)}"
                 conn.execute("UPDATE scheduled_messages SET status=?, last_attempt=?, error=? WHERE job_id=?",
                            ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
@@ -250,7 +229,6 @@ def handle_send_media():
         thumbnail_path = create_thumbnail(media_path, mediatype)
         job_id = str(uuid.uuid4())
 
-        # SALVA NO BANCO COM STATUS "processando"
         with get_db() as conn:
             conn.execute('''
                 INSERT INTO scheduled_messages (
@@ -260,20 +238,18 @@ def handle_send_media():
             ''', (job_id, number, media_path, thumbnail_path, mediatype, data.get('caption',''),
                   datetime.now(timezone.utc).isoformat(), 'processando'))
 
-        # INICIA O ENVIO EM SEGUNDO PLANO
         def background_send():
-            time.sleep(1)  # Pequeno delay para garantir que salvou no banco
+            time.sleep(1)
             send_message_to_evolution(job_id)
         
         thread = threading.Thread(target=background_send)
         thread.daemon = True
         thread.start()
 
-        # RETORNA IMEDIATAMENTE - CLIENTE CONSULTA STATUS DEPOIS
         return jsonify({
             "job_id": job_id,
             "status": "processando",
-            "message": "Mensagem em processamento. Use o job_id para consultar o status.",
+            "message": "Mensagem em processamento.",
             "thumbnail": thumbnail_path.replace(UPLOAD_FOLDER, '').lstrip('/')
         }), 200
 
@@ -301,7 +277,6 @@ def schedule_media():
         thumbnail_path = create_thumbnail(media_path, mediatype)
         job_id = str(uuid.uuid4())
 
-        # SALVA NO BANCO COM STATUS "agendado"
         with get_db() as conn:
             conn.execute('''
                 INSERT INTO scheduled_messages (
@@ -311,7 +286,6 @@ def schedule_media():
             ''', (job_id, number, media_path, thumbnail_path, mediatype, data.get('caption',''),
                   schedule_time.isoformat(), 'agendado'))
 
-        # AGENDA O ENVIO
         scheduler.add_job(send_message_to_evolution, 'date', run_date=schedule_time, args=[job_id], id=job_id)
 
         return jsonify({
@@ -338,8 +312,7 @@ def get_scheduled_messages():
                 thumb_url = DEFAULT_DOC_ICON
                 if row['thumbnail_path']:
                     thumb_filename = os.path.basename(row['thumbnail_path'])
-                    thumb_path = os.path.join(THUMB_FOLDER, thumb_filename)
-                    if os.path.exists(thumb_path):
+                    if os.path.exists(row['thumbnail_path']):
                         thumb_url = f"/uploads/thumbs/{thumb_filename}"
                 
                 messages.append({
@@ -388,14 +361,13 @@ def get_message_status(job_id):
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    """Rota simples para verificar se a API está funcionando"""
     try:
         with get_db() as conn:
             conn.execute("SELECT 1")
         return jsonify({
             "status": "healthy", 
             "database": "connected",
-            "environment": os.getenv("RENDER", "development"),
+            "environment": "production",
             "timestamp": datetime.now(timezone.utc).isoformat()
         }), 200
     except Exception as e:
@@ -406,23 +378,10 @@ def health_check():
         }), 500
 
 # ======================
-# CORS
-# ======================
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,apikey')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
-    return response
-
-# ======================
 # INICIALIZAÇÃO
 # ======================
 def initialize_app():
     print("Iniciando servidor Flask...")
-    print("Verificando banco de dados...")
-    
-    # Testa a conexão com o banco
     try:
         with get_db() as conn:
             count = conn.execute("SELECT COUNT(*) FROM scheduled_messages").fetchone()[0]
@@ -430,15 +389,11 @@ def initialize_app():
     except Exception as e:
         print(f"Erro no banco de dados: {e}")
     
-    # Recarrega agendamentos pendentes
     reload_pending_schedules()
-    print("Agendamentos recarregados.")
+    print("Aplicação inicializada.")
 
-# Inicializar ao importar
 initialize_app()
 
-# Para Render, usar gunicorn ou waitress
 if __name__ == '__main__':
     port = int(os.getenv("PORT", 5000))
-    debug = os.getenv("DEBUG", "false").lower() == "true"
-    app.run(host='0.0.0.0', port=port, debug=debug)
+    app.run(host='0.0.0.0', port=port, debug=False)
