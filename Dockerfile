@@ -18,7 +18,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Criar diretórios necessários
-RUN mkdir -p uploads/thumbs static main
+RUN mkdir -p uploads/thumbs
 
 EXPOSE 5000
 
