@@ -6,17 +6,15 @@ import base64, requests, sqlite3, os, uuid
 from contextlib import closing
 from PIL import Image
 from apscheduler.schedulers.background import BackgroundScheduler
-import fitz  # PyMuPDF
 import threading
 import time
 import psycopg2
 from psycopg2.extras import RealDictCursor
-import urllib.parse
 
 # ======================
 # CONFIGURAÇÃO FLASK
 # ======================
-app = Flask(__name__, static_folder='main', static_url_path='')
+app = Flask(__name__)
 
 # Configurações para Render
 API_KEY = os.getenv("API_KEY", "fmFeKYVdcU06C3S57mmVZ4BhsEwdVIww")
@@ -56,7 +54,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
 THUMB_FOLDER = os.path.join(UPLOAD_FOLDER, 'thumbs')
 THUMBNAIL_SIZE = (100, 100)
-DEFAULT_DOC_ICON = "/default_doc.png"
+DEFAULT_DOC_ICON = "/static/default_doc.png"
 
 # Criar diretórios
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -99,21 +97,6 @@ def init_db():
                         error TEXT
                     )
                 ''')
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS logs (
-                        id SERIAL PRIMARY KEY,
-                        job_id TEXT,
-                        scheduled_at TEXT,
-                        sent_at TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        caption TEXT,
-                        destination TEXT NOT NULL,
-                        mediatype TEXT,
-                        thumbnail_path TEXT,
-                        response TEXT NOT NULL,
-                        error TEXT
-                    )
-                ''')
             else:
                 # SQLite
                 cursor.execute('''
@@ -128,21 +111,6 @@ def init_db():
                         scheduled_at TEXT NOT NULL,
                         status TEXT NOT NULL,
                         last_attempt TEXT,
-                        error TEXT
-                    )
-                ''')
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS logs (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        job_id TEXT,
-                        scheduled_at TEXT,
-                        sent_at TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        caption TEXT,
-                        destination TEXT NOT NULL,
-                        mediatype TEXT,
-                        thumbnail_path TEXT,
-                        response TEXT NOT NULL,
                         error TEXT
                     )
                 ''')
@@ -177,26 +145,15 @@ def save_file(file_data, ext):
 
 def create_thumbnail(filepath, mediatype='image'):
     try:
-        thumb_path = os.path.join(THUMB_FOLDER, os.path.basename(filepath) + ".png")
-        
-        if mediatype == 'image':
-            img = Image.open(filepath)
-            img.thumbnail(THUMBNAIL_SIZE)
-            img.save(thumb_path)
-            
-        elif mediatype == 'document' and filepath.endswith('.pdf'):
-            doc = fitz.open(filepath)
-            page = doc[0]
-            pix = page.get_pixmap(matrix=fitz.Matrix(2,2))
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            img.thumbnail(THUMBNAIL_SIZE)
-            img.save(thumb_path)
-            
-        else:
-            # Para vídeo e outros tipos, usa ícone padrão
+        if mediatype != 'image':
             return DEFAULT_DOC_ICON
             
+        thumb_path = os.path.join(THUMB_FOLDER, os.path.basename(filepath) + ".png")
+        img = Image.open(filepath)
+        img.thumbnail(THUMBNAIL_SIZE)
+        img.save(thumb_path)
         return thumb_path
+        
     except Exception as e:
         print(f"Erro ao criar thumbnail: {e}")
         return DEFAULT_DOC_ICON
@@ -208,7 +165,10 @@ def send_message_to_evolution(job_id):
     try:
         with get_db() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM scheduled_messages WHERE job_id=%s", (job_id,))
+            if DB_CONFIG['type'] == 'postgresql':
+                cursor.execute("SELECT * FROM scheduled_messages WHERE job_id=%s", (job_id,))
+            else:
+                cursor.execute("SELECT * FROM scheduled_messages WHERE job_id=?", (job_id,))
             row = cursor.fetchone()
             
             if not row:
@@ -227,8 +187,12 @@ def send_message_to_evolution(job_id):
                     payload['media'] = base64.b64encode(f.read()).decode()
             except Exception as e:
                 error_msg = f"Erro ao ler arquivo: {str(e)}"
-                cursor.execute("UPDATE scheduled_messages SET status=%s, last_attempt=%s, error=%s WHERE job_id=%s",
-                           ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
+                if DB_CONFIG['type'] == 'postgresql':
+                    cursor.execute("UPDATE scheduled_messages SET status=%s, last_attempt=%s, error=%s WHERE job_id=%s",
+                               ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
+                else:
+                    cursor.execute("UPDATE scheduled_messages SET status=?, last_attempt=?, error=? WHERE job_id=?",
+                               ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
                 conn.commit()
                 return
 
@@ -236,21 +200,33 @@ def send_message_to_evolution(job_id):
                 response = requests.post(EVOLUTION_URL, json=payload, headers={"apikey": API_KEY}, timeout=30)
                 
                 if response.status_code == 200:
-                    cursor.execute("UPDATE scheduled_messages SET status=%s, last_attempt=%s, error=NULL WHERE job_id=%s",
-                               ("enviado", datetime.now(timezone.utc).isoformat(), job_id))
+                    if DB_CONFIG['type'] == 'postgresql':
+                        cursor.execute("UPDATE scheduled_messages SET status=%s, last_attempt=%s, error=NULL WHERE job_id=%s",
+                                   ("enviado", datetime.now(timezone.utc).isoformat(), job_id))
+                    else:
+                        cursor.execute("UPDATE scheduled_messages SET status=?, last_attempt=?, error=NULL WHERE job_id=?",
+                                   ("enviado", datetime.now(timezone.utc).isoformat(), job_id))
                     conn.commit()
                     print(f"Mensagem {job_id} enviada com sucesso")
                 else:
                     error_msg = f"Erro HTTP {response.status_code}: {response.text}"
-                    cursor.execute("UPDATE scheduled_messages SET status=%s, last_attempt=%s, error=%s WHERE job_id=%s",
-                               ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
+                    if DB_CONFIG['type'] == 'postgresql':
+                        cursor.execute("UPDATE scheduled_messages SET status=%s, last_attempt=%s, error=%s WHERE job_id=%s",
+                                   ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
+                    else:
+                        cursor.execute("UPDATE scheduled_messages SET status=?, last_attempt=?, error=? WHERE job_id=?",
+                                   ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
                     conn.commit()
                     print(f"Erro ao enviar mensagem {job_id}: {error_msg}")
 
             except Exception as e:
                 error_msg = f"Erro de conexão: {str(e)}"
-                cursor.execute("UPDATE scheduled_messages SET status=%s, last_attempt=%s, error=%s WHERE job_id=%s",
-                           ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
+                if DB_CONFIG['type'] == 'postgresql':
+                    cursor.execute("UPDATE scheduled_messages SET status=%s, last_attempt=%s, error=%s WHERE job_id=%s",
+                               ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
+                else:
+                    cursor.execute("UPDATE scheduled_messages SET status=?, last_attempt=?, error=? WHERE job_id=?",
+                               ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
                 conn.commit()
                 print(f"Erro de conexão para mensagem {job_id}: {error_msg}")
 
@@ -280,24 +256,56 @@ def reload_pending_schedules():
 @app.route('/')
 def index():
     try:
-        return send_from_directory(app.static_folder, 'index.html')
-    except Exception as e:
-        return f"""
-        <html>
-            <head><title>ICPA WhatsApp Scheduler</title></head>
+        # Tenta servir da pasta 'main' primeiro
+        if os.path.exists('main/index.html'):
+            return send_from_directory('main', 'index.html')
+        # Fallback para pasta 'static'
+        elif os.path.exists('static/index.html'):
+            return send_from_directory('static', 'index.html')
+        # Fallback final - página básica
+        else:
+            return """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>ICPA WhatsApp Scheduler</title>
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 40px; }
+                    h1 { color: #333; }
+                    .container { max-width: 800px; margin: 0 auto; }
+                    .endpoints { background: #f5f5f5; padding: 20px; border-radius: 5px; }
+                </style>
+            </head>
             <body>
-                <h1>ICPA WhatsApp Scheduler</h1>
-                <p>API está funcionando!</p>
-                <p>Database: {DB_CONFIG['type']}</p>
-                <p><a href="/api/health">Health Check</a></p>
-                <p><a href="/api/scheduled">Scheduled Messages</a></p>
+                <div class="container">
+                    <h1>ICPA WhatsApp Scheduler</h1>
+                    <p>API está funcionando corretamente!</p>
+                    <div class="endpoints">
+                        <h3>Endpoints disponíveis:</h3>
+                        <ul>
+                            <li><a href="/api/health">/api/health</a> - Health check</li>
+                            <li><a href="/api/scheduled">/api/scheduled</a> - Mensagens agendadas</li>
+                            <li>POST /api/send-media - Enviar mídia</li>
+                            <li>POST /api/schedule-media - Agendar mídia</li>
+                            <li>GET /api/status/&lt;job_id&gt; - Status da mensagem</li>
+                        </ul>
+                    </div>
+                    <p><strong>Database:</strong> {}</p>
+                </div>
             </body>
-        </html>
-        """
+            </html>
+            """.format(DB_CONFIG['type'])
+    except Exception as e:
+        return f"Erro ao carregar página: {str(e)}"
 
-@app.route('/<path:filename>')
+@app.route('/static/<path:filename>')
 def serve_static(filename):
-    return send_from_directory(app.static_folder, filename)
+    if os.path.exists('static'):
+        return send_from_directory('static', filename)
+    elif os.path.exists('main'):
+        return send_from_directory('main', filename)
+    else:
+        return "Static files not found", 404
 
 @app.route('/uploads/<path:filename>')
 def uploaded_file(filename):
@@ -325,7 +333,7 @@ def handle_send_media():
             return jsonify({"error": "Número ou mídia inválidos"}), 400
 
         mediatype = data.get('mediatype', 'image')
-        ext = mediatype if mediatype != 'document' else 'pdf'
+        ext = 'png' if mediatype == 'image' else 'pdf'
         media_path = save_file(media_b64, ext)
         thumbnail_path = create_thumbnail(media_path, mediatype)
         job_id = str(uuid.uuid4())
@@ -362,7 +370,7 @@ def handle_send_media():
             "job_id": job_id,
             "status": "processando",
             "message": "Mensagem em processamento.",
-            "thumbnail": thumbnail_path.replace(UPLOAD_FOLDER, '').lstrip('/')
+            "thumbnail": thumbnail_path.replace(UPLOAD_FOLDER, '').lstrip('/') if thumbnail_path != DEFAULT_DOC_ICON else DEFAULT_DOC_ICON
         }), 200
 
     except Exception as e:
@@ -384,7 +392,7 @@ def schedule_media():
             return jsonify({"error": "Dados inválidos"}), 400
 
         mediatype = data.get('mediatype','image')
-        ext = mediatype if mediatype != 'document' else 'pdf'
+        ext = 'png' if mediatype == 'image' else 'pdf'
         media_path = save_file(media_b64, ext)
         thumbnail_path = create_thumbnail(media_path, mediatype)
         job_id = str(uuid.uuid4())
@@ -430,17 +438,13 @@ def get_scheduled_messages():
     try:
         with get_db() as conn:
             cursor = conn.cursor()
-            if DB_CONFIG['type'] == 'postgresql':
-                cursor.execute("SELECT * FROM scheduled_messages ORDER BY scheduled_at DESC")
-            else:
-                cursor.execute("SELECT * FROM scheduled_messages ORDER BY scheduled_at DESC")
-            
+            cursor.execute("SELECT * FROM scheduled_messages ORDER BY scheduled_at DESC")
             rows = cursor.fetchall()
             messages = []
             
             for row in rows:
                 thumb_url = DEFAULT_DOC_ICON
-                if row['thumbnail_path']:
+                if row['thumbnail_path'] and row['thumbnail_path'] != DEFAULT_DOC_ICON:
                     thumb_filename = os.path.basename(row['thumbnail_path'])
                     if os.path.exists(row['thumbnail_path']):
                         thumb_url = f"/uploads/thumbs/{thumb_filename}"
@@ -502,16 +506,21 @@ def health_check():
             cursor = conn.cursor()
             cursor.execute("SELECT 1")
             
-        # Verifica se a pasta main existe
-        main_exists = os.path.exists(app.static_folder)
-        index_exists = os.path.exists(os.path.join(app.static_folder, 'index.html')) if main_exists else False
-        
+        # Verifica estrutura de pastas
+        main_exists = os.path.exists('main')
+        static_exists = os.path.exists('static')
+        main_index_exists = os.path.exists('main/index.html') if main_exists else False
+        static_index_exists = os.path.exists('static/index.html') if static_exists else False
+            
         return jsonify({
             "status": "healthy", 
             "database": DB_CONFIG['type'],
-            "main_folder_exists": main_exists,
-            "index_html_exists": index_exists,
-            "main_folder_path": app.static_folder,
+            "folders": {
+                "main_exists": main_exists,
+                "static_exists": static_exists,
+                "main_index_exists": main_index_exists,
+                "static_index_exists": static_index_exists
+            },
             "environment": "production",
             "timestamp": datetime.now(timezone.utc).isoformat()
         }), 200
@@ -527,22 +536,14 @@ def health_check():
 # ======================
 def initialize_app():
     print("Iniciando servidor Flask...")
-    print(f"Diretório atual: {os.getcwd()}")
-    print(f"Main folder: {app.static_folder}")
     print(f"Database type: {DB_CONFIG['type']}")
+    print(f"Diretório atual: {os.getcwd()}")
+    print(f"Arquivos no diretório: {os.listdir('.')}")
     
-    # Listar arquivos no diretório atual
-    print("Arquivos no diretório raiz:")
-    for file in os.listdir('.'):
-        print(f"  - {file}")
-    
-    # Listar arquivos na pasta main se existir
-    if os.path.exists(app.static_folder):
-        print("Arquivos na pasta main:")
-        for file in os.listdir(app.static_folder):
-            print(f"  - {file}")
-    else:
-        print("Pasta main não encontrada!")
+    if os.path.exists('main'):
+        print(f"Arquivos na pasta main: {os.listdir('main')}")
+    if os.path.exists('static'):
+        print(f"Arquivos na pasta static: {os.listdir('static')}")
     
     try:
         with get_db() as conn:
