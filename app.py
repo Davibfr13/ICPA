@@ -5,13 +5,14 @@ from datetime import datetime, timezone
 import base64, requests, sqlite3, uuid
 from contextlib import closing
 from PIL import Image
+from apscheduler.schedulers.background import BackgroundScheduler
 import threading
 import time
 
 # ======================
 # CONFIGURAÇÃO FLASK
 # ======================
-app = Flask(__name__)
+app = Flask(__name__, static_folder='main', static_url_path='')
 
 # Configurações
 API_KEY = os.getenv("API_KEY", "fmFeKYVdcU06C3S57mmVZ4BhsEwdVIww")
@@ -26,6 +27,7 @@ CORS(app)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
 THUMB_FOLDER = os.path.join(UPLOAD_FOLDER, 'thumbs')
+THUMBNAIL_SIZE = (100, 100)
 DATABASE = os.path.join(BASE_DIR, 'whatsapp_scheduler.db')
 
 # Criar diretórios
@@ -33,7 +35,7 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(THUMB_FOLDER, exist_ok=True)
 
 # ======================
-# BANCO DE DADOS (SQLite apenas)
+# BANCO DE DADOS
 # ======================
 def init_db():
     with closing(sqlite3.connect(DATABASE)) as conn:
@@ -44,6 +46,7 @@ def init_db():
                     job_id TEXT NOT NULL UNIQUE,
                     number TEXT NOT NULL,
                     media_path TEXT NOT NULL,
+                    thumbnail_path TEXT,
                     mediatype TEXT NOT NULL,
                     caption TEXT,
                     scheduled_at TEXT NOT NULL,
@@ -53,6 +56,9 @@ def init_db():
                 )
             ''')
 init_db()
+
+scheduler = BackgroundScheduler()
+scheduler.start()
 
 # ======================
 # FUNÇÕES AUXILIARES
@@ -78,6 +84,21 @@ def save_file(file_data, ext):
     with open(path, "wb") as f:
         f.write(base64.b64decode(file_data))
     return path
+
+def create_thumbnail(filepath, mediatype='image'):
+    try:
+        if mediatype != 'image':
+            return None
+            
+        thumb_path = os.path.join(THUMB_FOLDER, os.path.basename(filepath) + ".png")
+        img = Image.open(filepath)
+        img.thumbnail(THUMBNAIL_SIZE)
+        img.save(thumb_path)
+        return thumb_path
+        
+    except Exception as e:
+        print(f"Erro ao criar thumbnail: {e}")
+        return None
 
 # ======================
 # FUNÇÃO DE ENVIO
@@ -136,44 +157,47 @@ def send_message_to_evolution(job_id):
         print(f"Erro crítico no processamento: {str(e)}")
 
 # ======================
-# ROTAS PRINCIPAIS
+# RECARREGA AGENDAMENTOS
+# ======================
+def reload_pending_schedules():
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM scheduled_messages WHERE status='agendado'")
+        rows = cursor.fetchall()
+        
+        for row in rows:
+            job_id = row['job_id']
+            scheduled_at = datetime.fromisoformat(row['scheduled_at'])
+            if scheduled_at > datetime.now(timezone.utc):
+                if not scheduler.get_job(job_id):
+                    scheduler.add_job(send_message_to_evolution, 'date', run_date=scheduled_at, args=[job_id], id=job_id)
+                    print(f"Agendamento recarregado: {job_id}")
+
+# Carregar agendamentos pendentes ao iniciar
+reload_pending_schedules()
+
+# ======================
+# ROTAS DO FRONTEND
 # ======================
 @app.route('/')
 def index():
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>ICPA WhatsApp Scheduler</title>
-        <style>
-            body { font-family: Arial, sans-serif; margin: 40px; }
-            h1 { color: #333; }
-            .container { max-width: 800px; margin: 0 auto; }
-            .endpoints { background: #f5f5f5; padding: 20px; border-radius: 5px; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>ICPA WhatsApp Scheduler</h1>
-            <p>API está funcionando corretamente!</p>
-            <div class="endpoints">
-                <h3>Endpoints disponíveis:</h3>
-                <ul>
-                    <li><a href="/api/health">/api/health</a> - Health check</li>
-                    <li><a href="/api/scheduled">/api/scheduled</a> - Mensagens agendadas</li>
-                    <li>POST /api/send-media - Enviar mídia</li>
-                    <li>POST /api/schedule-media - Agendar mídia</li>
-                    <li>GET /api/status/&lt;job_id&gt; - Status da mensagem</li>
-                </ul>
-            </div>
-        </div>
-    </body>
-    </html>
-    """
+    return send_from_directory('main', 'index.html')
+
+@app.route('/calendar')
+def calendar():
+    return send_from_directory('main', 'calendar.html')
+
+@app.route('/<path:filename>')
+def serve_main_files(filename):
+    return send_from_directory('main', filename)
 
 @app.route('/uploads/<path:filename>')
 def uploaded_file(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
+
+@app.route('/uploads/thumbs/<path:filename>')
+def uploaded_thumb(filename):
+    return send_from_directory(THUMB_FOLDER, filename)
 
 # ======================
 # API ROUTES
@@ -195,16 +219,17 @@ def handle_send_media():
         mediatype = data.get('mediatype', 'image')
         ext = 'png' if mediatype == 'image' else 'pdf'
         media_path = save_file(media_b64, ext)
+        thumbnail_path = create_thumbnail(media_path, mediatype)
         job_id = str(uuid.uuid4())
 
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO scheduled_messages (
-                    job_id, number, media_path, mediatype, caption,
+                    job_id, number, media_path, thumbnail_path, mediatype, caption,
                     scheduled_at, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (job_id, number, media_path, mediatype, data.get('caption',''),
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (job_id, number, media_path, thumbnail_path, mediatype, data.get('caption',''),
                   datetime.now(timezone.utc).isoformat(), 'processando'))
             conn.commit()
 
@@ -216,10 +241,13 @@ def handle_send_media():
         thread.daemon = True
         thread.start()
 
+        thumb_url = f"/uploads/thumbs/{os.path.basename(thumbnail_path)}" if thumbnail_path else None
+
         return jsonify({
             "job_id": job_id,
             "status": "processando",
-            "message": "Mensagem em processamento."
+            "message": "Mensagem em processamento.",
+            "thumbnail": thumb_url
         }), 200
 
     except Exception as e:
@@ -243,33 +271,30 @@ def schedule_media():
         mediatype = data.get('mediatype','image')
         ext = 'png' if mediatype == 'image' else 'pdf'
         media_path = save_file(media_b64, ext)
+        thumbnail_path = create_thumbnail(media_path, mediatype)
         job_id = str(uuid.uuid4())
 
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO scheduled_messages (
-                    job_id, number, media_path, mediatype, caption,
+                    job_id, number, media_path, thumbnail_path, mediatype, caption,
                     scheduled_at, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (job_id, number, media_path, mediatype, data.get('caption',''),
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (job_id, number, media_path, thumbnail_path, mediatype, data.get('caption',''),
                   schedule_time.isoformat(), 'agendado'))
             conn.commit()
 
-        # Envia imediatamente (para simplificar)
-        def background_send():
-            time.sleep(1)
-            send_message_to_evolution(job_id)
-        
-        thread = threading.Thread(target=background_send)
-        thread.daemon = True
-        thread.start()
+        scheduler.add_job(send_message_to_evolution, 'date', run_date=schedule_time, args=[job_id], id=job_id)
+
+        thumb_url = f"/uploads/thumbs/{os.path.basename(thumbnail_path)}" if thumbnail_path else None
 
         return jsonify({
             "status": "agendado", 
             "job_id": job_id, 
             "scheduled_at": schedule_time.isoformat(),
-            "message": "Mensagem agendada com sucesso."
+            "message": "Mensagem agendada com sucesso.",
+            "thumbnail": thumb_url
         }), 200
         
     except Exception as e:
@@ -289,6 +314,12 @@ def get_scheduled_messages():
             messages = []
             
             for row in rows:
+                thumb_url = None
+                if row['thumbnail_path']:
+                    thumb_filename = os.path.basename(row['thumbnail_path'])
+                    if os.path.exists(row['thumbnail_path']):
+                        thumb_url = f"/uploads/thumbs/{thumb_filename}"
+                
                 messages.append({
                     "job_id": row['job_id'],
                     "number": row['number'],
@@ -297,7 +328,8 @@ def get_scheduled_messages():
                     "scheduled_at": row['scheduled_at'],
                     "status": row['status'],
                     "last_attempt": row['last_attempt'],
-                    "error": row['error']
+                    "error": row['error'],
+                    "thumbnail": thumb_url
                 })
         
         return jsonify(messages), 200
@@ -341,9 +373,19 @@ def health_check():
             cursor = conn.cursor()
             cursor.execute("SELECT 1")
             
+        # Verificar se frontend está acessível
+        main_exists = os.path.exists('main')
+        index_exists = os.path.exists('main/index.html') if main_exists else False
+        calendar_exists = os.path.exists('main/calendar.html') if main_exists else False
+            
         return jsonify({
             "status": "healthy", 
             "database": "sqlite",
+            "frontend": {
+                "main_folder_exists": main_exists,
+                "index_exists": index_exists,
+                "calendar_exists": calendar_exists
+            },
             "environment": "production",
             "timestamp": datetime.now(timezone.utc).isoformat()
         }), 200
@@ -353,6 +395,34 @@ def health_check():
             "database": "sqlite",
             "error": str(e)
         }), 500
+
+# ======================
+# INICIALIZAÇÃO
+# ======================
+def initialize_app():
+    print("Iniciando servidor Flask...")
+    print(f"Diretório atual: {os.getcwd()}")
+    
+    # Verificar estrutura de pastas
+    if os.path.exists('main'):
+        print("Arquivos na pasta main:")
+        for file in os.listdir('main'):
+            print(f"  - {file}")
+    else:
+        print("AVISO: Pasta 'main' não encontrada!")
+    
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM scheduled_messages")
+            count = cursor.fetchone()[0]
+            print(f"Banco de dados OK. {count} mensagens agendadas.")
+    except Exception as e:
+        print(f"Erro no banco de dados: {e}")
+    
+    print("Aplicação inicializada.")
+
+initialize_app()
 
 if __name__ == '__main__':
     port = int(os.getenv("PORT", 5000))
