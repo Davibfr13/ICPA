@@ -14,9 +14,9 @@ import time
 # ======================
 # CONFIGURAÇÃO FLASK
 # ======================
-app = Flask(__name__, static_folder="static")
+app = Flask(__name__, static_folder="static", static_url_path="")
 
-# --- Render-ready database & evolution config (injected) ---
+# --- Configurações para Render ---
 app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL", "sqlite:///local.db")
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "http://localhost:8080")
@@ -28,21 +28,25 @@ CORS(app, resources={r"/api/*": {"origins": "*"}})
 # ======================
 # CONFIGURAÇÕES
 # ======================
-API_KEY = "fmFeKYVdcU06C3S57mmVZ4BhsEwdVIww"
-INSTANCE_NAME = "ICPA"
-EVOLUTION_URL = f"http://localhost:8081/message/sendMedia/{INSTANCE_NAME}"
-DATABASE = 'whatsapp_scheduler.db'
-UPLOAD_FOLDER = 'uploads'
+API_KEY = os.getenv("API_KEY", "fmFeKYVdcU06C3S57mmVZ4BhsEwdVIww")
+INSTANCE_NAME = os.getenv("INSTANCE_NAME", "ICPA")
+EVOLUTION_URL = os.getenv("EVOLUTION_URL", f"http://localhost:8081/message/sendMedia/{INSTANCE_NAME}")
+
+# Usar /tmp para arquivos temporários no Render
+UPLOAD_FOLDER = os.path.join(os.getcwd(), 'uploads')
 THUMB_FOLDER = os.path.join(UPLOAD_FOLDER, 'thumbs')
 THUMBNAIL_SIZE = (100, 100)
-DEFAULT_DOC_ICON = "/uploads/default_doc.png"
+DEFAULT_DOC_ICON = "/static/default_doc.png"  # Mover para pasta static
 
+# Criar diretórios
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(THUMB_FOLDER, exist_ok=True)
 
 # ======================
-# BANCO DE DADOS
+# BANCO DE DADOS (SQLite persistente)
 # ======================
+DATABASE = os.path.join(os.getcwd(), 'whatsapp_scheduler.db')
+
 def init_db():
     with closing(sqlite3.connect(DATABASE)) as conn:
         with conn:
@@ -132,7 +136,8 @@ def create_thumbnail(filepath, mediatype='image'):
         else:
             return DEFAULT_DOC_ICON
         return thumb_path
-    except:
+    except Exception as e:
+        print(f"Erro ao criar thumbnail: {e}")
         return DEFAULT_DOC_ICON
 
 # ======================
@@ -206,8 +211,6 @@ def reload_pending_schedules():
                     scheduler.add_job(send_message_to_evolution, 'date', run_date=scheduled_at, args=[job_id], id=job_id)
                     print(f"Agendamento recarregado: {job_id}")
 
-reload_pending_schedules()
-
 # ======================
 # ROTAS PRINCIPAIS
 # ======================
@@ -215,9 +218,17 @@ reload_pending_schedules()
 def index():
     return send_from_directory(app.static_folder, "index.html")
 
+@app.route('/<path:path>')
+def serve_static(path):
+    return send_from_directory(app.static_folder, path)
+
 @app.route('/uploads/<path:filename>')
 def uploaded_file(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
+
+@app.route('/uploads/thumbs/<path:filename>')
+def uploaded_thumb(filename):
+    return send_from_directory(THUMB_FOLDER, filename)
 
 @app.route('/api/send-media', methods=['POST'])
 def handle_send_media():
@@ -263,7 +274,7 @@ def handle_send_media():
             "job_id": job_id,
             "status": "processando",
             "message": "Mensagem em processamento. Use o job_id para consultar o status.",
-            "thumbnail": thumbnail_path
+            "thumbnail": thumbnail_path.replace(UPLOAD_FOLDER, '').lstrip('/')
         }), 200
 
     except Exception as e:
@@ -381,9 +392,18 @@ def health_check():
     try:
         with get_db() as conn:
             conn.execute("SELECT 1")
-        return jsonify({"status": "healthy", "database": "connected"}), 200
-    except:
-        return jsonify({"status": "unhealthy", "database": "disconnected"}), 500
+        return jsonify({
+            "status": "healthy", 
+            "database": "connected",
+            "environment": os.getenv("RENDER", "development"),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "status": "unhealthy", 
+            "database": "disconnected",
+            "error": str(e)
+        }), 500
 
 # ======================
 # CORS
@@ -398,7 +418,7 @@ def after_request(response):
 # ======================
 # INICIALIZAÇÃO
 # ======================
-if __name__ == '__main__':
+def initialize_app():
     print("Iniciando servidor Flask...")
     print("Verificando banco de dados...")
     
@@ -410,4 +430,15 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"Erro no banco de dados: {e}")
     
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # Recarrega agendamentos pendentes
+    reload_pending_schedules()
+    print("Agendamentos recarregados.")
+
+# Inicializar ao importar
+initialize_app()
+
+# Para Render, usar gunicorn ou waitress
+if __name__ == '__main__':
+    port = int(os.getenv("PORT", 5000))
+    debug = os.getenv("DEBUG", "false").lower() == "true"
+    app.run(host='0.0.0.0', port=port, debug=debug)
