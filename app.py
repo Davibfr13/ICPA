@@ -12,25 +12,27 @@ import time
 # ======================
 # CONFIGURAÇÃO FLASK
 # ======================
-app = Flask(__name__, static_folder='main', static_url_path='')
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MAIN_FOLDER = os.path.join(BASE_DIR, 'main')
 
-# Configurações
+app = Flask(__name__, static_folder=MAIN_FOLDER, static_url_path='/')
+CORS(app)
+
+# ======================
+# CONFIGURAÇÕES GERAIS
+# ======================
 API_KEY = os.getenv("API_KEY", "fmFeKYVdcU06C3S57mmVZ4BhsEwdVIww")
 INSTANCE_NAME = os.getenv("INSTANCE_NAME", "ICPA")
 EVOLUTION_URL = os.getenv("EVOLUTION_URL", f"http://localhost:8081/message/sendMedia/{INSTANCE_NAME}")
 
-CORS(app)
+# Banco de dados persistente (Render usa /data)
+DATA_DIR = "/data" if os.path.exists("/data") else BASE_DIR
+DATABASE = os.path.join(DATA_DIR, "whatsapp_scheduler.db")
 
-# ======================
-# CONFIGURAÇÕES
-# ======================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
+UPLOAD_FOLDER = os.path.join(DATA_DIR, 'uploads')
 THUMB_FOLDER = os.path.join(UPLOAD_FOLDER, 'thumbs')
 THUMBNAIL_SIZE = (100, 100)
-DATABASE = os.path.join(BASE_DIR, 'whatsapp_scheduler.db')
 
-# Criar diretórios
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(THUMB_FOLDER, exist_ok=True)
 
@@ -89,13 +91,11 @@ def create_thumbnail(filepath, mediatype='image'):
     try:
         if mediatype != 'image':
             return None
-            
         thumb_path = os.path.join(THUMB_FOLDER, os.path.basename(filepath) + ".png")
         img = Image.open(filepath)
         img.thumbnail(THUMBNAIL_SIZE)
         img.save(thumb_path)
         return thumb_path
-        
     except Exception as e:
         print(f"Erro ao criar thumbnail: {e}")
         return None
@@ -109,7 +109,6 @@ def send_message_to_evolution(job_id):
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM scheduled_messages WHERE job_id=?", (job_id,))
             row = cursor.fetchone()
-            
             if not row:
                 print(f"Job {job_id} não encontrado")
                 return
@@ -127,32 +126,29 @@ def send_message_to_evolution(job_id):
             except Exception as e:
                 error_msg = f"Erro ao ler arquivo: {str(e)}"
                 cursor.execute("UPDATE scheduled_messages SET status=?, last_attempt=?, error=? WHERE job_id=?",
-                           ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
+                               ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
                 conn.commit()
                 return
 
             try:
                 response = requests.post(EVOLUTION_URL, json=payload, headers={"apikey": API_KEY}, timeout=30)
-                
                 if response.status_code == 200:
                     cursor.execute("UPDATE scheduled_messages SET status=?, last_attempt=?, error=NULL WHERE job_id=?",
-                               ("enviado", datetime.now(timezone.utc).isoformat(), job_id))
+                                   ("enviado", datetime.now(timezone.utc).isoformat(), job_id))
                     conn.commit()
                     print(f"Mensagem {job_id} enviada com sucesso")
                 else:
                     error_msg = f"Erro HTTP {response.status_code}: {response.text}"
                     cursor.execute("UPDATE scheduled_messages SET status=?, last_attempt=?, error=? WHERE job_id=?",
-                               ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
+                                   ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
                     conn.commit()
                     print(f"Erro ao enviar mensagem {job_id}: {error_msg}")
-
             except Exception as e:
                 error_msg = f"Erro de conexão: {str(e)}"
                 cursor.execute("UPDATE scheduled_messages SET status=?, last_attempt=?, error=? WHERE job_id=?",
-                           ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
+                               ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
                 conn.commit()
                 print(f"Erro de conexão para mensagem {job_id}: {error_msg}")
-
     except Exception as e:
         print(f"Erro crítico no processamento: {str(e)}")
 
@@ -164,7 +160,6 @@ def reload_pending_schedules():
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM scheduled_messages WHERE status='agendado'")
         rows = cursor.fetchall()
-        
         for row in rows:
             job_id = row['job_id']
             scheduled_at = datetime.fromisoformat(row['scheduled_at'])
@@ -173,23 +168,22 @@ def reload_pending_schedules():
                     scheduler.add_job(send_message_to_evolution, 'date', run_date=scheduled_at, args=[job_id], id=job_id)
                     print(f"Agendamento recarregado: {job_id}")
 
-# Carregar agendamentos pendentes ao iniciar
 reload_pending_schedules()
 
 # ======================
-# ROTAS DO FRONTEND
+# ROTAS FRONTEND
 # ======================
 @app.route('/')
 def index():
-    return send_from_directory('main', 'index.html')
+    if os.path.exists(os.path.join(MAIN_FOLDER, 'index.html')):
+        return app.send_static_file('index.html')
+    return "Frontend não encontrado", 404
 
 @app.route('/calendar')
 def calendar():
-    return send_from_directory('main', 'calendar.html')
-
-@app.route('/<path:filename>')
-def serve_main_files(filename):
-    return send_from_directory('main', filename)
+    if os.path.exists(os.path.join(MAIN_FOLDER, 'calendar.html')):
+        return app.send_static_file('calendar.html')
+    return "Página calendar.html não encontrada", 404
 
 @app.route('/uploads/<path:filename>')
 def uploaded_file(filename):
@@ -207,49 +201,36 @@ def handle_send_media():
     client_key = request.headers.get('apikey')
     if client_key != API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
-    
     try:
         data = request.get_json()
         number = data.get('number')
         media_b64 = data.get('media')
-        
         if not number or not media_b64 or not is_base64(media_b64):
             return jsonify({"error": "Número ou mídia inválidos"}), 400
-
         mediatype = data.get('mediatype', 'image')
         ext = 'png' if mediatype == 'image' else 'pdf'
         media_path = save_file(media_b64, ext)
         thumbnail_path = create_thumbnail(media_path, mediatype)
         job_id = str(uuid.uuid4())
-
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO scheduled_messages (
-                    job_id, number, media_path, thumbnail_path, mediatype, caption,
-                    scheduled_at, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO scheduled_messages (job_id, number, media_path, thumbnail_path, mediatype, caption, scheduled_at, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (job_id, number, media_path, thumbnail_path, mediatype, data.get('caption',''),
                   datetime.now(timezone.utc).isoformat(), 'processando'))
             conn.commit()
-
         def background_send():
             time.sleep(1)
             send_message_to_evolution(job_id)
-        
-        thread = threading.Thread(target=background_send)
-        thread.daemon = True
-        thread.start()
-
+        threading.Thread(target=background_send, daemon=True).start()
         thumb_url = f"/uploads/thumbs/{os.path.basename(thumbnail_path)}" if thumbnail_path else None
-
         return jsonify({
             "job_id": job_id,
             "status": "processando",
             "message": "Mensagem em processamento.",
             "thumbnail": thumb_url
         }), 200
-
     except Exception as e:
         return jsonify({"error": f"Erro interno: {str(e)}"}), 500
 
@@ -258,37 +239,28 @@ def schedule_media():
     client_key = request.headers.get('apikey')
     if client_key != API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
-    
     try:
         data = request.get_json()
         number = data.get('number')
         media_b64 = data.get('media')
         schedule_time = datetime.fromisoformat(data.get('schedule_time'))
-        
         if not number or not media_b64 or not is_base64(media_b64) or not schedule_time:
             return jsonify({"error": "Dados inválidos"}), 400
-
         mediatype = data.get('mediatype','image')
         ext = 'png' if mediatype == 'image' else 'pdf'
         media_path = save_file(media_b64, ext)
         thumbnail_path = create_thumbnail(media_path, mediatype)
         job_id = str(uuid.uuid4())
-
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO scheduled_messages (
-                    job_id, number, media_path, thumbnail_path, mediatype, caption,
-                    scheduled_at, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO scheduled_messages (job_id, number, media_path, thumbnail_path, mediatype, caption, scheduled_at, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (job_id, number, media_path, thumbnail_path, mediatype, data.get('caption',''),
                   schedule_time.isoformat(), 'agendado'))
             conn.commit()
-
         scheduler.add_job(send_message_to_evolution, 'date', run_date=schedule_time, args=[job_id], id=job_id)
-
         thumb_url = f"/uploads/thumbs/{os.path.basename(thumbnail_path)}" if thumbnail_path else None
-
         return jsonify({
             "status": "agendado", 
             "job_id": job_id, 
@@ -296,7 +268,6 @@ def schedule_media():
             "message": "Mensagem agendada com sucesso.",
             "thumbnail": thumb_url
         }), 200
-        
     except Exception as e:
         return jsonify({"error": f"Erro interno: {str(e)}"}), 500
 
@@ -305,21 +276,16 @@ def get_scheduled_messages():
     client_key = request.headers.get('apikey')
     if client_key != API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
-    
     try:
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM scheduled_messages ORDER BY scheduled_at DESC")
             rows = cursor.fetchall()
             messages = []
-            
             for row in rows:
                 thumb_url = None
-                if row['thumbnail_path']:
-                    thumb_filename = os.path.basename(row['thumbnail_path'])
-                    if os.path.exists(row['thumbnail_path']):
-                        thumb_url = f"/uploads/thumbs/{thumb_filename}"
-                
+                if row['thumbnail_path'] and os.path.exists(row['thumbnail_path']):
+                    thumb_url = f"/uploads/thumbs/{os.path.basename(row['thumbnail_path'])}"
                 messages.append({
                     "job_id": row['job_id'],
                     "number": row['number'],
@@ -331,86 +297,40 @@ def get_scheduled_messages():
                     "error": row['error'],
                     "thumbnail": thumb_url
                 })
-        
         return jsonify(messages), 200
-        
     except Exception as e:
         return jsonify({"error": f"Erro ao buscar mensagens: {str(e)}"}), 500
-
-@app.route('/api/status/<job_id>', methods=['GET'])
-def get_message_status(job_id):
-    client_key = request.headers.get('apikey')
-    if client_key != API_KEY:
-        return jsonify({"error": "Unauthorized"}), 401
-    
-    try:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM scheduled_messages WHERE job_id=?", (job_id,))
-            row = cursor.fetchone()
-            
-            if row:
-                return jsonify({
-                    "job_id": job_id,
-                    "status": row['status'],
-                    "error": row['error'],
-                    "last_attempt": row['last_attempt'],
-                    "number": row['number'],
-                    "mediatype": row['mediatype'],
-                    "caption": row['caption'],
-                    "scheduled_at": row['scheduled_at']
-                }), 200
-            else:
-                return jsonify({"error": "Mensagem não encontrada"}), 404
-                
-    except Exception as e:
-        return jsonify({"error": f"Erro ao buscar status: {str(e)}"}), 500
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
     try:
         with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT 1")
-            
-        # Verificar se frontend está acessível
-        main_exists = os.path.exists('main')
-        index_exists = os.path.exists('main/index.html') if main_exists else False
-        calendar_exists = os.path.exists('main/calendar.html') if main_exists else False
-            
+            conn.execute("SELECT 1")
         return jsonify({
-            "status": "healthy", 
+            "status": "healthy",
             "database": "sqlite",
             "frontend": {
-                "main_folder_exists": main_exists,
-                "index_exists": index_exists,
-                "calendar_exists": calendar_exists
+                "main_folder_exists": os.path.exists(MAIN_FOLDER),
+                "index_exists": os.path.exists(os.path.join(MAIN_FOLDER, 'index.html')),
+                "calendar_exists": os.path.exists(os.path.join(MAIN_FOLDER, 'calendar.html'))
             },
-            "environment": "production",
+            "environment": "render",
             "timestamp": datetime.now(timezone.utc).isoformat()
         }), 200
     except Exception as e:
-        return jsonify({
-            "status": "unhealthy", 
-            "database": "sqlite",
-            "error": str(e)
-        }), 500
+        return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
 # ======================
 # INICIALIZAÇÃO
 # ======================
 def initialize_app():
-    print("Iniciando servidor Flask...")
-    print(f"Diretório atual: {os.getcwd()}")
-    
-    # Verificar estrutura de pastas
-    if os.path.exists('main'):
-        print("Arquivos na pasta main:")
-        for file in os.listdir('main'):
-            print(f"  - {file}")
+    print("Iniciando servidor Flask no Render...")
+    print(f"Diretório base: {BASE_DIR}")
+    print(f"Data dir: {DATA_DIR}")
+    if os.path.exists(MAIN_FOLDER):
+        print("Arquivos em main/:", os.listdir(MAIN_FOLDER))
     else:
-        print("AVISO: Pasta 'main' não encontrada!")
-    
+        print("⚠️ Pasta 'main' não encontrada no container!")
     try:
         with get_db() as conn:
             cursor = conn.cursor()
@@ -418,14 +338,10 @@ def initialize_app():
             count = cursor.fetchone()[0]
             print(f"Banco de dados OK. {count} mensagens agendadas.")
     except Exception as e:
-        print(f"Erro no banco de dados: {e}")
-    
-    print("Aplicação inicializada.")
+        print(f"Erro ao conectar banco: {e}")
 
 initialize_app()
 
 if __name__ == '__main__':
     port = int(os.getenv("PORT", 5000))
-    debug = os.getenv("DEBUG", "false").lower() == "true"
-    print(f"Iniciando servidor na porta {port}...")
-    app.run(host='0.0.0.0', port=port, debug=debug)
+    app.run(host='0.0.0.0', port=port)
