@@ -13,9 +13,8 @@ import time
 # CONFIGURAÇÃO FLASK
 # ======================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MAIN_FOLDER = os.path.join(BASE_DIR, 'main')
 
-app = Flask(__name__, static_folder=MAIN_FOLDER, static_url_path='/')
+app = Flask(__name__)
 CORS(app)
 
 # ======================
@@ -175,15 +174,16 @@ reload_pending_schedules()
 # ======================
 @app.route('/')
 def index():
-    if os.path.exists(os.path.join(MAIN_FOLDER, 'index.html')):
-        return app.send_static_file('index.html')
-    return "Frontend não encontrado", 404
+    return send_from_directory(BASE_DIR, 'index.html')
 
 @app.route('/calendar')
 def calendar():
-    if os.path.exists(os.path.join(MAIN_FOLDER, 'calendar.html')):
-        return app.send_static_file('calendar.html')
-    return "Página calendar.html não encontrada", 404
+    return send_from_directory(BASE_DIR, 'calendar.html')
+
+@app.route('/<path:filename>')
+def serve_static_files(filename):
+    # Serve CSS, JS, images, etc. da raiz
+    return send_from_directory(BASE_DIR, filename)
 
 @app.route('/uploads/<path:filename>')
 def uploaded_file(filename):
@@ -310,9 +310,8 @@ def health_check():
             "status": "healthy",
             "database": "sqlite",
             "frontend": {
-                "main_folder_exists": os.path.exists(MAIN_FOLDER),
-                "index_exists": os.path.exists(os.path.join(MAIN_FOLDER, 'index.html')),
-                "calendar_exists": os.path.exists(os.path.join(MAIN_FOLDER, 'calendar.html'))
+                "index_exists": os.path.exists(os.path.join(BASE_DIR, 'index.html')),
+                "calendar_exists": os.path.exists(os.path.join(BASE_DIR, 'calendar.html'))
             },
             "environment": "render",
             "timestamp": datetime.now(timezone.utc).isoformat()
@@ -327,10 +326,7 @@ def initialize_app():
     print("Iniciando servidor Flask no Render...")
     print(f"Diretório base: {BASE_DIR}")
     print(f"Data dir: {DATA_DIR}")
-    if os.path.exists(MAIN_FOLDER):
-        print("Arquivos em main/:", os.listdir(MAIN_FOLDER))
-    else:
-        print("⚠️ Pasta 'main' não encontrada no container!")
+    print(f"Arquivos na raiz: {[f for f in os.listdir(BASE_DIR) if f.endswith(('.html', '.css', '.js'))]}")
     try:
         with get_db() as conn:
             cursor = conn.cursor()
