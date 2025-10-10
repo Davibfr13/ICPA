@@ -1,343 +1,140 @@
 import os
-from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
-from datetime import datetime, timezone
-import base64, requests, sqlite3, uuid
-from contextlib import closing
-from PIL import Image
-from apscheduler.schedulers.background import BackgroundScheduler
 import threading
 import time
+import sqlite3
+import requests
+from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
+from datetime import datetime
+from apscheduler.schedulers.background import BackgroundScheduler
+from werkzeug.utils import secure_filename
+from PIL import Image
 
-# ======================
-# CONFIGURAÇÃO FLASK
-# ======================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-app = Flask(__name__)
+# Configuração principal
+app = Flask(__name__, static_folder='main', static_url_path='/')
 CORS(app)
 
-# ======================
-# CONFIGURAÇÕES GERAIS
-# ======================
-API_KEY = os.getenv("API_KEY", "fmFeKYVdcU06C3S57mmVZ4BhsEwdVIww")
-INSTANCE_NAME = os.getenv("INSTANCE_NAME", "ICPA")
-EVOLUTION_URL = os.getenv("EVOLUTION_URL", f"http://localhost:8081/message/sendMedia/{INSTANCE_NAME}")
-
-# Banco de dados persistente (Render usa /data)
-DATA_DIR = "/data" if os.path.exists("/data") else BASE_DIR
-DATABASE = os.path.join(DATA_DIR, "whatsapp_scheduler.db")
-
-UPLOAD_FOLDER = os.path.join(DATA_DIR, 'uploads')
+UPLOAD_FOLDER = 'uploads'
 THUMB_FOLDER = os.path.join(UPLOAD_FOLDER, 'thumbs')
-THUMBNAIL_SIZE = (100, 100)
-
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(THUMB_FOLDER, exist_ok=True)
 
-# ======================
-# BANCO DE DADOS
-# ======================
-def init_db():
-    with closing(sqlite3.connect(DATABASE)) as conn:
-        with conn:
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS scheduled_messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    job_id TEXT NOT NULL UNIQUE,
-                    number TEXT NOT NULL,
-                    media_path TEXT NOT NULL,
-                    thumbnail_path TEXT,
-                    mediatype TEXT NOT NULL,
-                    caption TEXT,
-                    scheduled_at TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    last_attempt TEXT,
-                    error TEXT
-                )
-            ''')
-init_db()
+DATABASE = 'schedule.db'
+EVOLUTION_URL = "http://localhost:8080"  # Evolution API interna
+INSTANCE_KEY = "evolution_instance"
 
-scheduler = BackgroundScheduler()
-scheduler.start()
-
-# ======================
-# FUNÇÕES AUXILIARES
-# ======================
+# ---------------------- Banco ----------------------
 def get_db():
     conn = sqlite3.connect(DATABASE)
     conn.row_factory = sqlite3.Row
     return conn
 
-def is_base64(sb):
-    try:
-        if isinstance(sb, str):
-            sb_bytes = sb.encode('utf-8')
-        else:
-            sb_bytes = sb
-        return base64.b64encode(base64.b64decode(sb_bytes)) == sb_bytes
-    except:
-        return False
+def init_db():
+    with get_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS schedules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                phone TEXT NOT NULL,
+                message TEXT,
+                media_path TEXT,
+                schedule_time TEXT NOT NULL,
+                status TEXT DEFAULT 'pending'
+            )
+        """)
+init_db()
 
-def save_file(file_data, ext):
-    filename = f"{uuid.uuid4().hex}.{ext}"
-    path = os.path.join(UPLOAD_FOLDER, filename)
-    with open(path, "wb") as f:
-        f.write(base64.b64decode(file_data))
-    return path
-
-def create_thumbnail(filepath, mediatype='image'):
+# ---------------------- Miniatura ----------------------
+def create_thumbnail(image_path):
     try:
-        if mediatype != 'image':
-            return None
-        thumb_path = os.path.join(THUMB_FOLDER, os.path.basename(filepath) + ".png")
-        img = Image.open(filepath)
-        img.thumbnail(THUMBNAIL_SIZE)
-        img.save(thumb_path)
+        thumb_path = os.path.join(THUMB_FOLDER, os.path.basename(image_path))
+        with Image.open(image_path) as img:
+            img.thumbnail((200, 200))
+            img.save(thumb_path)
         return thumb_path
     except Exception as e:
-        print(f"Erro ao criar thumbnail: {e}")
+        print("Erro ao criar miniatura:", e)
         return None
 
-# ======================
-# FUNÇÃO DE ENVIO
-# ======================
-def send_message_to_evolution(job_id):
-    try:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM scheduled_messages WHERE job_id=?", (job_id,))
-            row = cursor.fetchone()
-            if not row:
-                print(f"Job {job_id} não encontrado")
-                return
+# ---------------------- Scheduler ----------------------
+scheduler = BackgroundScheduler()
+scheduler.start()
 
-            payload = {
-                "number": row['number'],
-                "mediatype": row['mediatype'],
-                "media": None,
-                "caption": row['caption'] or ''
-            }
-
-            try:
-                with open(row['media_path'], 'rb') as f:
-                    payload['media'] = base64.b64encode(f.read()).decode()
-            except Exception as e:
-                error_msg = f"Erro ao ler arquivo: {str(e)}"
-                cursor.execute("UPDATE scheduled_messages SET status=?, last_attempt=?, error=? WHERE job_id=?",
-                               ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
-                conn.commit()
-                return
-
-            try:
-                response = requests.post(EVOLUTION_URL, json=payload, headers={"apikey": API_KEY}, timeout=30)
-                if response.status_code == 200:
-                    cursor.execute("UPDATE scheduled_messages SET status=?, last_attempt=?, error=NULL WHERE job_id=?",
-                                   ("enviado", datetime.now(timezone.utc).isoformat(), job_id))
-                    conn.commit()
-                    print(f"Mensagem {job_id} enviada com sucesso")
-                else:
-                    error_msg = f"Erro HTTP {response.status_code}: {response.text}"
-                    cursor.execute("UPDATE scheduled_messages SET status=?, last_attempt=?, error=? WHERE job_id=?",
-                                   ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
-                    conn.commit()
-                    print(f"Erro ao enviar mensagem {job_id}: {error_msg}")
-            except Exception as e:
-                error_msg = f"Erro de conexão: {str(e)}"
-                cursor.execute("UPDATE scheduled_messages SET status=?, last_attempt=?, error=? WHERE job_id=?",
-                               ("erro", datetime.now(timezone.utc).isoformat(), error_msg, job_id))
-                conn.commit()
-                print(f"Erro de conexão para mensagem {job_id}: {error_msg}")
-    except Exception as e:
-        print(f"Erro crítico no processamento: {str(e)}")
-
-# ======================
-# RECARREGA AGENDAMENTOS
-# ======================
-def reload_pending_schedules():
+def send_scheduled_message(schedule_id):
     with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM scheduled_messages WHERE status='agendado'")
-        rows = cursor.fetchall()
+        schedule = conn.execute("SELECT * FROM schedules WHERE id=?", (schedule_id,)).fetchone()
+        if not schedule or schedule["status"] != "pending":
+            return
+
+        data = {
+            "number": schedule["phone"],
+            "text": schedule["message"]
+        }
+
+        if schedule["media_path"]:
+            with open(schedule["media_path"], "rb") as f:
+                files = {"file": f}
+                response = requests.post(f"{EVOLUTION_URL}/message/sendMedia/{INSTANCE_KEY}", files=files, data={"number": schedule["phone"], "caption": schedule["message"]})
+        else:
+            response = requests.post(f"{EVOLUTION_URL}/message/sendText/{INSTANCE_KEY}", json=data)
+
+        status = "sent" if response.ok else "failed"
+        conn.execute("UPDATE schedules SET status=? WHERE id=?", (status, schedule_id))
+        conn.commit()
+        print(f"Mensagem {status} (ID {schedule_id})")
+
+def load_pending_jobs():
+    with get_db() as conn:
+        rows = conn.execute("SELECT id, schedule_time FROM schedules WHERE status='pending'").fetchall()
         for row in rows:
-            job_id = row['job_id']
-            scheduled_at = datetime.fromisoformat(row['scheduled_at'])
-            if scheduled_at > datetime.now(timezone.utc):
-                if not scheduler.get_job(job_id):
-                    scheduler.add_job(send_message_to_evolution, 'date', run_date=scheduled_at, args=[job_id], id=job_id)
-                    print(f"Agendamento recarregado: {job_id}")
+            try:
+                run_time = datetime.strptime(row["schedule_time"], "%Y-%m-%d %H:%M:%S")
+                if run_time > datetime.now():
+                    scheduler.add_job(send_scheduled_message, 'date', run_date=run_time, args=[row["id"]])
+            except Exception as e:
+                print("Erro ao reativar job:", e)
 
-reload_pending_schedules()
+threading.Thread(target=load_pending_jobs).start()
 
-# ======================
-# ROTAS FRONTEND
-# ======================
-@app.route('/')
+# ---------------------- Rotas ----------------------
+@app.route("/")
 def index():
-    return send_from_directory(BASE_DIR, 'index.html')
+    return app.send_static_file("index.html")
 
-@app.route('/calendar')
+@app.route("/calendar")
 def calendar():
-    return send_from_directory(BASE_DIR, 'calendar.html')
+    return app.send_static_file("calendar.html")
 
-@app.route('/<path:filename>')
-def serve_static_files(filename):
-    # Serve CSS, JS, images, etc. da raiz
-    return send_from_directory(BASE_DIR, filename)
-
-@app.route('/uploads/<path:filename>')
-def uploaded_file(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename)
-
-@app.route('/uploads/thumbs/<path:filename>')
-def uploaded_thumb(filename):
-    return send_from_directory(THUMB_FOLDER, filename)
-
-# ======================
-# API ROUTES
-# ======================
-@app.route('/api/send-media', methods=['POST'])
-def handle_send_media():
-    client_key = request.headers.get('apikey')
-    if client_key != API_KEY:
-        return jsonify({"error": "Unauthorized"}), 401
-    try:
-        data = request.get_json()
-        number = data.get('number')
-        media_b64 = data.get('media')
-        if not number or not media_b64 or not is_base64(media_b64):
-            return jsonify({"error": "Número ou mídia inválidos"}), 400
-        mediatype = data.get('mediatype', 'image')
-        ext = 'png' if mediatype == 'image' else 'pdf'
-        media_path = save_file(media_b64, ext)
-        thumbnail_path = create_thumbnail(media_path, mediatype)
-        job_id = str(uuid.uuid4())
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO scheduled_messages (job_id, number, media_path, thumbnail_path, mediatype, caption, scheduled_at, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (job_id, number, media_path, thumbnail_path, mediatype, data.get('caption',''),
-                  datetime.now(timezone.utc).isoformat(), 'processando'))
-            conn.commit()
-        def background_send():
-            time.sleep(1)
-            send_message_to_evolution(job_id)
-        threading.Thread(target=background_send, daemon=True).start()
-        thumb_url = f"/uploads/thumbs/{os.path.basename(thumbnail_path)}" if thumbnail_path else None
-        return jsonify({
-            "job_id": job_id,
-            "status": "processando",
-            "message": "Mensagem em processamento.",
-            "thumbnail": thumb_url
-        }), 200
-    except Exception as e:
-        return jsonify({"error": f"Erro interno: {str(e)}"}), 500
-
-@app.route('/api/schedule-media', methods=['POST'])
+@app.route("/api/schedule-media", methods=["POST"])
 def schedule_media():
-    client_key = request.headers.get('apikey')
-    if client_key != API_KEY:
-        return jsonify({"error": "Unauthorized"}), 401
-    try:
-        data = request.get_json()
-        number = data.get('number')
-        media_b64 = data.get('media')
-        schedule_time = datetime.fromisoformat(data.get('schedule_time'))
-        if not number or not media_b64 or not is_base64(media_b64) or not schedule_time:
-            return jsonify({"error": "Dados inválidos"}), 400
-        mediatype = data.get('mediatype','image')
-        ext = 'png' if mediatype == 'image' else 'pdf'
-        media_path = save_file(media_b64, ext)
-        thumbnail_path = create_thumbnail(media_path, mediatype)
-        job_id = str(uuid.uuid4())
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO scheduled_messages (job_id, number, media_path, thumbnail_path, mediatype, caption, scheduled_at, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (job_id, number, media_path, thumbnail_path, mediatype, data.get('caption',''),
-                  schedule_time.isoformat(), 'agendado'))
-            conn.commit()
-        scheduler.add_job(send_message_to_evolution, 'date', run_date=schedule_time, args=[job_id], id=job_id)
-        thumb_url = f"/uploads/thumbs/{os.path.basename(thumbnail_path)}" if thumbnail_path else None
-        return jsonify({
-            "status": "agendado", 
-            "job_id": job_id, 
-            "scheduled_at": schedule_time.isoformat(),
-            "message": "Mensagem agendada com sucesso.",
-            "thumbnail": thumb_url
-        }), 200
-    except Exception as e:
-        return jsonify({"error": f"Erro interno: {str(e)}"}), 500
+    phone = request.form.get("phone")
+    message = request.form.get("message", "")
+    schedule_time = request.form.get("schedule_time")
+    file = request.files.get("file")
 
-@app.route('/api/scheduled', methods=['GET'])
-def get_scheduled_messages():
-    client_key = request.headers.get('apikey')
-    if client_key != API_KEY:
-        return jsonify({"error": "Unauthorized"}), 401
-    try:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM scheduled_messages ORDER BY scheduled_at DESC")
-            rows = cursor.fetchall()
-            messages = []
-            for row in rows:
-                thumb_url = None
-                if row['thumbnail_path'] and os.path.exists(row['thumbnail_path']):
-                    thumb_url = f"/uploads/thumbs/{os.path.basename(row['thumbnail_path'])}"
-                messages.append({
-                    "job_id": row['job_id'],
-                    "number": row['number'],
-                    "mediatype": row['mediatype'],
-                    "caption": row['caption'],
-                    "scheduled_at": row['scheduled_at'],
-                    "status": row['status'],
-                    "last_attempt": row['last_attempt'],
-                    "error": row['error'],
-                    "thumbnail": thumb_url
-                })
-        return jsonify(messages), 200
-    except Exception as e:
-        return jsonify({"error": f"Erro ao buscar mensagens: {str(e)}"}), 500
+    if not all([phone, schedule_time, file]):
+        return jsonify({"error": "Campos obrigatórios ausentes"}), 400
 
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    try:
-        with get_db() as conn:
-            conn.execute("SELECT 1")
-        return jsonify({
-            "status": "healthy",
-            "database": "sqlite",
-            "frontend": {
-                "index_exists": os.path.exists(os.path.join(BASE_DIR, 'index.html')),
-                "calendar_exists": os.path.exists(os.path.join(BASE_DIR, 'calendar.html'))
-            },
-            "environment": "render",
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }), 200
-    except Exception as e:
-        return jsonify({"status": "unhealthy", "error": str(e)}), 500
+    filename = secure_filename(file.filename)
+    file_path = os.path.join(UPLOAD_FOLDER, filename)
+    file.save(file_path)
+    create_thumbnail(file_path)
 
-# ======================
-# INICIALIZAÇÃO
-# ======================
-def initialize_app():
-    print("Iniciando servidor Flask no Render...")
-    print(f"Diretório base: {BASE_DIR}")
-    print(f"Data dir: {DATA_DIR}")
-    print(f"Arquivos na raiz: {[f for f in os.listdir(BASE_DIR) if f.endswith(('.html', '.css', '.js'))]}")
-    try:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM scheduled_messages")
-            count = cursor.fetchone()[0]
-            print(f"Banco de dados OK. {count} mensagens agendadas.")
-    except Exception as e:
-        print(f"Erro ao conectar banco: {e}")
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO schedules (phone, message, media_path, schedule_time) VALUES (?, ?, ?, ?)",
+                    (phone, message, file_path, schedule_time))
+        conn.commit()
+        schedule_id = cur.lastrowid
 
-initialize_app()
+    run_time = datetime.strptime(schedule_time, "%Y-%m-%d %H:%M:%S")
+    scheduler.add_job(send_scheduled_message, 'date', run_date=run_time, args=[schedule_id])
+    return jsonify({"status": "scheduled", "id": schedule_id})
 
-if __name__ == '__main__':
-    port = int(os.getenv("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+@app.route("/api/scheduled")
+def list_scheduled():
+    with get_db() as conn:
+        schedules = conn.execute("SELECT * FROM schedules ORDER BY schedule_time DESC").fetchall()
+        return jsonify([dict(row) for row in schedules])
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
