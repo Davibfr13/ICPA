@@ -89,7 +89,60 @@ def create_thumbnail(filepath, mediatype='image'):
 # === ROTAS DE FRONTEND ===
 @app.route('/')
 def index():
-    return app.send_static_file('index.html')
+    try:
+        # Caminho de frontend customizado
+        if os.path.exists('main/index.html'):
+            return send_from_directory('main', 'index.html')
+        else:
+            # Interface simples com link para Evolution Manager
+            evolution_url = f"http://localhost:8080/manager"
+            public_url = request.host_url.rstrip('/')
+            evolution_public = f"{public_url}:8080/manager"
+
+            return f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>ICPA WhatsApp Scheduler</title>
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 40px; background: #fafafa; }}
+                    .container {{ max-width: 800px; margin: 0 auto; text-align: center; }}
+                    h1 {{ color: #333; }}
+                    .btn {{
+                        display: inline-block;
+                        background-color: #2b7cff;
+                        color: white;
+                        padding: 12px 20px;
+                        border-radius: 6px;
+                        text-decoration: none;
+                        font-weight: bold;
+                        margin-top: 20px;
+                    }}
+                    .btn:hover {{ background-color: #1f5ed9; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>ICPA WhatsApp Scheduler</h1>
+                    <p>API Flask e Evolution API estão em execução.</p>
+                    <p><b>Frontend:</b> {'main/index.html' if os.path.exists('main/index.html') else 'Não encontrado'}</p>
+                    <a href="{evolution_public}" target="_blank" class="btn">🌐 Abrir Gerenciador Evolution</a>
+                    <div style="margin-top:40px; text-align:left; background:#f5f5f5; padding:20px; border-radius:8px;">
+                        <h3>Endpoints disponíveis:</h3>
+                        <ul>
+                            <li><a href="/api/health">/api/health</a> - Health check</li>
+                            <li><a href="/api/scheduled">/api/scheduled</a> - Mensagens agendadas</li>
+                            <li>POST /api/send-media - Enviar mídia</li>
+                            <li>POST /api/schedule-media - Agendar mídia</li>
+                        </ul>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+    except Exception as e:
+        return f"Erro ao carregar página: {str(e)}"
+
 
 @app.route('/calendar')
 def calendar():
