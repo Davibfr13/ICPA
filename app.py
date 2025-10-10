@@ -1,17 +1,20 @@
 import os
+import uuid
+import base64
 import threading
 import time
 import sqlite3
 import requests
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-from datetime import datetime
+from datetime import datetime, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
-from werkzeug.utils import secure_filename
 from PIL import Image
+from contextlib import closing
 
-# Configuração principal
-app = Flask(__name__, static_folder='main', static_url_path='/')
+# === CONFIGURAÇÃO FLASK ===
+# Servir arquivos estáticos diretamente da raiz (onde estão index.html e calendar.html)
+app = Flask(__name__, static_folder='.', static_url_path='')
 CORS(app)
 
 UPLOAD_FOLDER = 'uploads'
@@ -19,122 +22,103 @@ THUMB_FOLDER = os.path.join(UPLOAD_FOLDER, 'thumbs')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(THUMB_FOLDER, exist_ok=True)
 
-DATABASE = 'schedule.db'
-EVOLUTION_URL = "http://localhost:8080"  # Evolution API interna
-INSTANCE_KEY = "evolution_instance"
+DATABASE = 'whatsapp_scheduler.db'
+EVOLUTION_URL = "http://localhost:8080"
+INSTANCE_NAME = os.getenv("INSTANCE_NAME", "ICPA")
+API_KEY = os.getenv("API_KEY", "your_api_key_here")
 
-# ---------------------- Banco ----------------------
+# === BANCO DE DADOS ===
+def init_db():
+    with sqlite3.connect(DATABASE) as conn:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS scheduled_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL UNIQUE,
+                number TEXT NOT NULL,
+                media_path TEXT,
+                thumbnail_path TEXT,
+                mediatype TEXT,
+                caption TEXT,
+                scheduled_at TEXT NOT NULL,
+                status TEXT,
+                last_attempt TEXT,
+                error TEXT
+            )
+        ''')
+init_db()
+
+scheduler = BackgroundScheduler()
+scheduler.start()
+
+# === FUNÇÕES AUXILIARES ===
 def get_db():
     conn = sqlite3.connect(DATABASE)
     conn.row_factory = sqlite3.Row
     return conn
 
-def init_db():
-    with get_db() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS schedules (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                phone TEXT NOT NULL,
-                message TEXT,
-                media_path TEXT,
-                schedule_time TEXT NOT NULL,
-                status TEXT DEFAULT 'pending'
-            )
-        """)
-init_db()
-
-# ---------------------- Miniatura ----------------------
-def create_thumbnail(image_path):
+def is_base64(sb):
     try:
-        thumb_path = os.path.join(THUMB_FOLDER, os.path.basename(image_path))
-        with Image.open(image_path) as img:
-            img.thumbnail((200, 200))
-            img.save(thumb_path)
+        if isinstance(sb, str):
+            sb_bytes = sb.encode('utf-8')
+        else:
+            sb_bytes = sb
+        return base64.b64encode(base64.b64decode(sb_bytes)) == sb_bytes
+    except:
+        return False
+
+def save_file(file_data, ext):
+    filename = f"{uuid.uuid4().hex}.{ext}"
+    path = os.path.join(UPLOAD_FOLDER, filename)
+    with open(path, "wb") as f:
+        f.write(base64.b64decode(file_data))
+    return path
+
+def create_thumbnail(filepath, mediatype='image'):
+    try:
+        if mediatype != 'image':
+            return None
+        thumb_path = os.path.join(THUMB_FOLDER, os.path.basename(filepath) + ".png")
+        img = Image.open(filepath)
+        img.thumbnail((100, 100))
+        img.save(thumb_path)
         return thumb_path
     except Exception as e:
-        print("Erro ao criar miniatura:", e)
+        print("Erro ao criar thumbnail:", e)
         return None
 
-# ---------------------- Scheduler ----------------------
-scheduler = BackgroundScheduler()
-scheduler.start()
-
-def send_scheduled_message(schedule_id):
-    with get_db() as conn:
-        schedule = conn.execute("SELECT * FROM schedules WHERE id=?", (schedule_id,)).fetchone()
-        if not schedule or schedule["status"] != "pending":
-            return
-
-        data = {
-            "number": schedule["phone"],
-            "text": schedule["message"]
-        }
-
-        if schedule["media_path"]:
-            with open(schedule["media_path"], "rb") as f:
-                files = {"file": f}
-                response = requests.post(f"{EVOLUTION_URL}/message/sendMedia/{INSTANCE_KEY}", files=files, data={"number": schedule["phone"], "caption": schedule["message"]})
-        else:
-            response = requests.post(f"{EVOLUTION_URL}/message/sendText/{INSTANCE_KEY}", json=data)
-
-        status = "sent" if response.ok else "failed"
-        conn.execute("UPDATE schedules SET status=? WHERE id=?", (status, schedule_id))
-        conn.commit()
-        print(f"Mensagem {status} (ID {schedule_id})")
-
-def load_pending_jobs():
-    with get_db() as conn:
-        rows = conn.execute("SELECT id, schedule_time FROM schedules WHERE status='pending'").fetchall()
-        for row in rows:
-            try:
-                run_time = datetime.strptime(row["schedule_time"], "%Y-%m-%d %H:%M:%S")
-                if run_time > datetime.now():
-                    scheduler.add_job(send_scheduled_message, 'date', run_date=run_time, args=[row["id"]])
-            except Exception as e:
-                print("Erro ao reativar job:", e)
-
-threading.Thread(target=load_pending_jobs).start()
-
-# ---------------------- Rotas ----------------------
-@app.route("/")
+# === ROTAS DE FRONTEND ===
+@app.route('/')
 def index():
-    return app.send_static_file("index.html")
+    return app.send_static_file('index.html')
 
-@app.route("/calendar")
+@app.route('/calendar')
 def calendar():
-    return app.send_static_file("calendar.html")
+    return app.send_static_file('calendar.html')
 
-@app.route("/api/schedule-media", methods=["POST"])
-def schedule_media():
-    phone = request.form.get("phone")
-    message = request.form.get("message", "")
-    schedule_time = request.form.get("schedule_time")
-    file = request.files.get("file")
+@app.route('/uploads/<path:filename>')
+def uploaded_file(filename):
+    return send_from_directory(UPLOAD_FOLDER, filename)
 
-    if not all([phone, schedule_time, file]):
-        return jsonify({"error": "Campos obrigatórios ausentes"}), 400
+@app.route('/uploads/thumbs/<path:filename>')
+def uploaded_thumb(filename):
+    return send_from_directory(THUMB_FOLDER, filename)
 
-    filename = secure_filename(file.filename)
-    file_path = os.path.join(UPLOAD_FOLDER, filename)
-    file.save(file_path)
-    create_thumbnail(file_path)
+# === ROTA DE SAÚDE (TESTE) ===
+@app.route('/api/health', methods=['GET'])
+def health():
+    ok = False
+    try:
+        with get_db() as conn:
+            conn.execute("SELECT 1")
+        ok = True
+    except:
+        ok = False
+    return jsonify({
+        "status": "healthy" if ok else "unhealthy",
+        "index_exists": os.path.exists('index.html'),
+        "calendar_exists": os.path.exists('calendar.html')
+    })
 
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("INSERT INTO schedules (phone, message, media_path, schedule_time) VALUES (?, ?, ?, ?)",
-                    (phone, message, file_path, schedule_time))
-        conn.commit()
-        schedule_id = cur.lastrowid
-
-    run_time = datetime.strptime(schedule_time, "%Y-%m-%d %H:%M:%S")
-    scheduler.add_job(send_scheduled_message, 'date', run_date=run_time, args=[schedule_id])
-    return jsonify({"status": "scheduled", "id": schedule_id})
-
-@app.route("/api/scheduled")
-def list_scheduled():
-    with get_db() as conn:
-        schedules = conn.execute("SELECT * FROM schedules ORDER BY schedule_time DESC").fetchall()
-        return jsonify([dict(row) for row in schedules])
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+if __name__ == '__main__':
+    port = int(os.getenv("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
