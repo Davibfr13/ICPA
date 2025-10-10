@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Instalar Node.js e dependências do sistema
+# Instalar dependências do sistema e Node.js
 RUN apt-get update && apt-get install -y \
     curl \
     gcc \
@@ -10,26 +10,25 @@ RUN apt-get update && apt-get install -y \
     npm \
     && rm -rf /var/lib/apt/lists/*
 
-# Instalar dependências do Flask
+# Copiar e instalar dependências Python
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copiar toda a aplicação
+# Copiar o restante do projeto
 COPY . .
 
-# Instalar Evolution API (versão anterior)
+# Instalar dependências da Evolution API
 WORKDIR /app/evolution
 RUN npm install
 
-# Voltar para a pasta principal
+# Voltar ao diretório do Flask
 WORKDIR /app
 
-# Criar diretórios usados pelo Flask
+# Criar diretórios de upload
 RUN mkdir -p uploads/thumbs
 
-# Expor as duas portas (Evolution 8080, Flask 5000)
 EXPOSE 5000 8080
 
-# Rodar ambos os servidores em paralelo
-CMD ["bash", "-c", "cd evolution && npm start & gunicorn --bind 0.0.0.0:5000 app:app"]
+# Iniciar Evolution + Flask simultaneamente
+CMD bash -c "cd evolution && npm start & gunicorn --bind 0.0.0.0:5000 app:app"
