@@ -1,6 +1,7 @@
 Flask
 Flask-Cors
-gunicorn
 requests
 Pillow
-apscheduler
+APScheduler
+gunicorn
+psycopg2-binary
