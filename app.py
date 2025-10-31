@@ -23,9 +23,10 @@ GLOBAL_API_KEY = os.getenv("GLOBAL_API_KEY", "fmFeKYVdcU06C3S57mmVZ4BhsEwdVIww")
 INSTANCE_NAME = os.getenv("INSTANCE_NAME", "ICPA")
 EVOLUTION_URL = os.getenv("EVOLUTION_URL", "https://evolution-lg1k.onrender.com/message/sendMedia/ICPA")
 
+# Supabase / PostgreSQL URL - REMOVA ?schema=public
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://postgres.ermyehfyvbllpvavqwzt:fa26grxB%23UCGPT%23@aws-1-us-east-1.pooler.supabase.com:6543/postgres?schema=public"
+    "postgresql://postgres:FA26grxB%23UCGPT%23@aws-1-us-east-1.pooler.supabase.com:6543/postgres"
 )
 
 UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
@@ -36,10 +37,15 @@ os.makedirs(THUMB_FOLDER, exist_ok=True)
 THUMBNAIL_SIZE = (100, 100)
 
 # ======================
-# BANCO DE DADOS (PostgreSQL)
+# BANCO DE DADOS
 # ======================
 def get_db():
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    # define schema padrão
+    cur = conn.cursor()
+    cur.execute("SET search_path TO public;")
+    cur.close()
+    return conn
 
 def init_db():
     conn = get_db()
@@ -221,10 +227,9 @@ def health():
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
 # ======================
-# INICIALIZAÇÃO
+# INICIALIZAÇÃO (Gunicorn)
 # ======================
 if __name__ != "__main__":
-    # só inicializa DB e jobs quando for importado pelo Gunicorn
     init_db()
     reload_pending_schedules()
     print("🚀 Flask pronto para Gunicorn no Render.")
