@@ -19,7 +19,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, static_folder='.', static_url_path='')
 CORS(app)
 
-API_KEY = os.getenv("API_KEY", "0D30D72C9D86-4A07-A3B9-CDAD39907EBC")
+GLOBAL_API_KEY = os.getenv("GLOBAL_API_KEY", "fmFeKYVdcU06C3S57mmVZ4BhsEwdVIww")
 INSTANCE_NAME = os.getenv("INSTANCE_NAME", "ICPA")
 EVOLUTION_URL = os.getenv("EVOLUTION_URL", "https://evolution-lg1k.onrender.com/message/sendMedia/ICPA")
 
